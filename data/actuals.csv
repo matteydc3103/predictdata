@@ -1,0 +1,36 @@
+# Actual released US economic data, 2015-2024 (approximate; refresh with
+# scripts/refresh_actuals.py when network access to FRED is available).
+# cpi_yoy_dec  = CPI inflation, Dec year-over-year, %
+# unemployment_rate_dec = unemployment rate, December, %
+# gdp_annual   = real GDP growth, annual average, %
+indicator,period,actual
+cpi_yoy_dec,2015,0.7
+cpi_yoy_dec,2016,2.1
+cpi_yoy_dec,2017,2.1
+cpi_yoy_dec,2018,1.9
+cpi_yoy_dec,2019,2.3
+cpi_yoy_dec,2020,1.4
+cpi_yoy_dec,2021,7.0
+cpi_yoy_dec,2022,6.5
+cpi_yoy_dec,2023,3.4
+cpi_yoy_dec,2024,2.9
+unemployment_rate_dec,2015,5.0
+unemployment_rate_dec,2016,4.7
+unemployment_rate_dec,2017,4.1
+unemployment_rate_dec,2018,3.9
+unemployment_rate_dec,2019,3.6
+unemployment_rate_dec,2020,6.7
+unemployment_rate_dec,2021,3.9
+unemployment_rate_dec,2022,3.5
+unemployment_rate_dec,2023,3.7
+unemployment_rate_dec,2024,4.1
+gdp_annual,2015,2.9
+gdp_annual,2016,1.8
+gdp_annual,2017,2.5
+gdp_annual,2018,3.0
+gdp_annual,2019,2.6
+gdp_annual,2020,-2.2
+gdp_annual,2021,6.1
+gdp_annual,2022,2.5
+gdp_annual,2023,2.9
+gdp_annual,2024,2.8
