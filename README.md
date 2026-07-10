@@ -1,5 +1,57 @@
 # Economist Prediction Rankings
 
+Two components live here:
+
+1. **`nfp_analysis/`** - statistical tests and a trade strategy built on the
+   Bloomberg NFP forecaster panel (102 releases, Jan 2018 - Jun 2026, 7,720
+   individual submissions). See [NFP analysis](#nfp-forecaster-analysis--trade-signal) below.
+2. **`economist_rankings/`** - the generic forecast-ranking pipeline that
+   works on any indicator/forecast spreadsheet.
+
+## NFP forecaster analysis & trade signal
+
+Raw survey inputs are in `data/nfp/` (extracted from the LIVE workbook);
+everything else is recomputed from scratch - firm metrics match the workbook
+to 5 decimals (pinned by `tests/test_nfp_validation.py`).
+
+```bash
+pip install -r requirements.txt
+python -m nfp_analysis report      # every test -> output/nfp_report.xlsx
+python -m nfp_analysis backtest    # walk-forward stats to the console
+python -m nfp_analysis signal      # live playbook for the next print
+python -m pytest tests/            # validate against workbook values
+```
+
+### What the tests found
+
+| Test | Result |
+|---|---|
+| Firm skill (74 qualified firms, FDR-corrected) | Only 4CAST/Continuum's positive IC survives (q=0.048); Credit Agricole's IC is significantly *negative* (q=0.089). Everything else is indistinguishable from noise. |
+| Persistence (split-half) | Rank correlations 0.04-0.09, all p>0.45 - past accuracy does not predict future accuracy. |
+| Pooled IC | -0.003 (p=0.83): deviating from consensus carries no information on average. |
+| Top-5 IC agreement signal | **The workbook's claimed 74% hit / p=0.017 does not replicate** - ~20 definitional variants give 40-71% hit, none significant, and the signal fails the base-rate permutation null (p≈0.29). Its apparent edge is mostly the period's upside-surprise base rate. |
+| Consensus bias | The robust finding: the survey median systematically low-balls payrolls. Mean z-surprise +0.95 full sample (t=2.8, p=0.006), +1.45 in 2022-26 (t=3.4, p=0.001), attenuating in 2024-26 (p=0.07). |
+
+### The strategy the evidence supports
+
+`nfp_analysis/strategy.py`, all walk-forward (no lookahead):
+
+- **Trigger - consensus-bias tilt**: before each print, t-test the trailing
+  24 releases' z-surprises. Only trade when |t| ≥ 1.5, in the direction of
+  the bias. Backtest 2022-26: 33 fires, avg signed z-surprise +1.10
+  dispersion-units, t=2.33.
+- **Skew - top-5 agreement**: scale size 1.5x when the 5 highest
+  trailing-IC forecasters lean the same way, 0.5x when they lean against.
+  Never initiates a trade on its own.
+- **Expression**: front-end rates (2y note / SOFR futures) or USD into the
+  print; positive expected surprise = short duration / long USD.
+- **Current call** (after Jun-26): trailing bias t=1.14 -> **stand down**;
+  the 2022-24 low-ball regime has faded.
+
+Caveats: ~8 NFP prints a year clear the gate; scored against first print
+only (revisions and market reaction are not modelled); dispersion-unit
+P&L is a proxy, not slippage-adjusted returns.
+
 Rank economists (Santander's Stephen Stanley, J.P. Morgan's Michael Feroli,
 Goldman's Jan Hatzius, ...) by how accurately they predict economic data
 releases over the last 10 years, so you can see which forecasters are
