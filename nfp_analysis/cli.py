@@ -9,7 +9,13 @@ import pandas as pd
 from .data import build_panel
 from .report import build_report
 from .signal import backtest, backtest_stats, parameter_sensitivity, signal_for_release
-from .strategy import bias_backtest, combined_backtest, live_recommendation, strategy_stats
+from .strategy import (
+    bias_backtest,
+    combined_backtest,
+    dispersion_backtest,
+    live_recommendation,
+    strategy_stats,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         print(parameter_sensitivity(panel, start=args.start).round(3).to_string(index=False))
         print("\nStrategy comparison (fires / hit rate / avg signed z-surprise / t):")
         for name, bt, col in (
+            ("dispersion", dispersion_backtest(panel, start=args.start), "direction"),
             ("top5_signal", sig_bt, "direction"),
             ("bias_tilt", bias_backtest(panel, start=args.start), "direction"),
             ("combined", combined_backtest(panel, start=args.start), "bias_direction"),

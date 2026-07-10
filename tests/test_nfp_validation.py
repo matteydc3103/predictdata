@@ -58,3 +58,23 @@ def test_qualified_universe_matches_workbook():
     fm = firm_metrics(build_panel())
     assert int(fm["qualified"].sum()) == 74
     assert fm.iloc[0]["firm"].startswith("4CAST")  # workbook overall rank 1
+
+
+def test_dispersion_strategy_backtest():
+    """Pin the recommended strategy's 2022+ walk-forward result."""
+    from nfp_analysis.strategy import dispersion_backtest, strategy_stats
+
+    bt = dispersion_backtest(build_panel())
+    st = strategy_stats(bt, n_permutations=2000)
+    assert st["n_fires"] == 53
+    assert np.isclose(st["hit_rate"], 41 / 53, atol=1e-6)
+    assert st["t_stat"] > 4.0
+    assert st["p_base_rate"] < 0.02
+
+
+def test_live_recommendation_runs():
+    from nfp_analysis.strategy import live_recommendation
+
+    rec = live_recommendation(build_panel())
+    assert rec["direction"] in (-1, 0, 1)
+    assert "expression" in rec

@@ -32,25 +32,43 @@ python -m pytest tests/            # validate against workbook values
 | Top-5 IC agreement signal | **The workbook's claimed 74% hit / p=0.017 does not replicate** - ~20 definitional variants give 40-71% hit, none significant, and the signal fails the base-rate permutation null (p≈0.29). Its apparent edge is mostly the period's upside-surprise base rate. |
 | Consensus bias | The robust finding: the survey median systematically low-balls payrolls. Mean z-surprise +0.95 full sample (t=2.8, p=0.006), +1.45 in 2022-26 (t=3.4, p=0.001), attenuating in 2024-26 (p=0.07). |
 
-### The strategy the evidence supports
+### The recommended strategy: dispersion regime
 
-`nfp_analysis/strategy.py`, all walk-forward (no lookahead):
+A systematic feature screen (8 walk-forward-legal candidates tested
+against the surprise) found exactly one strong directional predictor:
+**relative panel dispersion**. When forecasters disagree more than usual,
+surprises skew negative; when they cluster tightly, surprises skew
+positive (Spearman r=-0.33, p=0.003, survives Bonferroni; dispersion
+averages 2.0x its norm before downside surprises vs 1.3x before upside,
+Mann-Whitney p=0.01). Disagreement is a downside-risk barometer the
+consensus median fails to price.
 
-- **Trigger - consensus-bias tilt**: before each print, t-test the trailing
-  24 releases' z-surprises. Only trade when |t| ≥ 1.5, in the direction of
-  the bias. Backtest 2022-26: 33 fires, avg signed z-surprise +1.10
-  dispersion-units, t=2.33.
-- **Skew - top-5 agreement**: scale size 1.5x when the 5 highest
-  trailing-IC forecasters lean the same way, 0.5x when they lean against.
-  Never initiates a trade on its own.
-- **Expression**: front-end rates (2y note / SOFR futures) or USD into the
-  print; positive expected surprise = short duration / long USD.
-- **Current call** (after Jun-26): trailing bias t=1.14 -> **stand down**;
-  the 2022-24 low-ball regime has faded.
+`nfp_analysis/strategy.py`, all walk-forward (no lookahead - a release's
+dispersion is known before the print since the survey closes days ahead):
 
-Caveats: ~8 NFP prints a year clear the gate; scored against first print
-only (revisions and market reaction are not modelled); dispersion-unit
-P&L is a proxy, not slippage-adjusted returns.
+- **Direction**: `disp_rel` = release dispersion / trailing-24-release
+  median dispersion. Long the surprise when disp_rel ≤ 1.0, short when
+  ≥ 1.3, stand aside between.
+- **Size**: 1.5x when the trailing-24 bias t-stat agrees with the
+  direction (|t| ≥ 1.5), 0.5x when it disagrees, else 1.0x.
+- **Expression**: positive expected surprise = short front-end rates
+  (2y note / SOFR futures) / long USD into the print; negative = reverse.
+- **2022-26 walk-forward**: 53 fires on 55 releases, **77% hit rate,
+  t=4.35, permutation-vs-base-rate p=0.003**, halves 77%/78%, shorts
+  7/10 (vs 31% base rate), ~+43k average surprise captured per event.
+  Every threshold cell in the 0.9-1.1 x 1.2-1.5 grid gives t ≥ 3.5, and
+  the rule kept working in 2024-26 after the raw long bias faded (76%,
+  t=2.84). Recent live behaviour: short before Feb-26 (surprise -147k)
+  and Jun-26 (-56k), both correct.
+- **Benchmarks** (same window): always-long 69%/t=3.4; bias tilt
+  61%/t=2.33; top-5 IC agreement 67%/t=0.57 and fails the base-rate null.
+
+Caveats, stated plainly: the dispersion feature was screened on the full
+sample, so the 2022-26 evaluation overlaps its discovery data - the
+defence is threshold-insensitivity, subperiod stability, and mechanism,
+not a clean holdout. 2018-21 was breakeven-ish (+0.68 avg z, t=0.8).
+Scored against first print only; market reaction, slippage and costs are
+not modelled. ~10 events per year fire.
 
 Rank economists (Santander's Stephen Stanley, J.P. Morgan's Michael Feroli,
 Goldman's Jan Hatzius, ...) by how accurately they predict economic data
