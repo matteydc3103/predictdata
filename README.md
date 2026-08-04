@@ -1,12 +1,68 @@
 # Economist Prediction Rankings
 
-Two components live here:
+Three components live here:
 
 1. **`nfp_analysis/`** - statistical tests and a trade strategy built on the
    Bloomberg NFP forecaster panel (102 releases, Jan 2018 - Jun 2026, 7,720
    individual submissions). See [NFP analysis](#nfp-forecaster-analysis--trade-signal) below.
 2. **`economist_rankings/`** - the generic forecast-ranking pipeline that
    works on any indicator/forecast spreadsheet.
+3. **`basis_analysis/`** - spot FRA-€STR basis event study: does a big
+   widening of Euribor3M-fix-minus-3M-€STR-OIS plummet within 10 days?
+   See [FRA-€STR basis](#spot-fra-estr-basis-analysis) below.
+
+## Spot FRA-ESTR basis analysis
+
+Tests the proposition *"when the spot basis (Euribor 3M fix − 3M €STR OIS)
+widens a lot, it collapses within ~10 days"*.
+
+```bash
+python -m basis_analysis                 # demo on the bundled SYNTHETIC data
+python -m basis_analysis --fix my_euribor.csv --ois my_estr_ois.csv
+python -m basis_analysis --ois-align prev_day   # timing-artefact check
+python -m pytest tests/test_basis_analysis.py
+```
+
+Writes `output/basis/report.md` + charts + `events.csv`.
+
+**The comparison problem, and how it is solved here.** The 3M €STR OIS
+reprices instantly in rallies/sell-offs; the Euribor fix is set once a day
+at 11:00 CET by panel banks that pass the same policy-path moves through
+with a lag of a few days. Naively differencing the two therefore produces
+basis spikes that are partly a *stale-fix artefact* which decays as the fix
+catches up - easy to mistake for (or conflate with) genuine credit-premium
+mean reversion. The pipeline:
+
+- fits a **distributed-lag pass-through model** of daily fix changes on
+  current + 10 lagged OIS changes (walk-forward refits, no lookahead);
+- turns its tail weights into each day's **pending catch-up** - the fix
+  drift already owed to past OIS moves - and a **catch-up-adjusted basis**
+  (`basis + pending`), the fair daily comparison of the two series;
+- flags "widened a lot" via rolling z-scores (level signal, plus a
+  widening-speed signal as robustness), first-crossings with a cooldown;
+- runs an **event study**: forward basis change at 1-20 day horizons vs a
+  random-day permutation null, hit rates vs base rate, median retracement,
+  a threshold x horizon robustness grid, a tightening-side asymmetry
+  check, and a naive sell-the-basis P&L;
+- **decomposes every "plummet"** into mechanically-owed catch-up vs genuine
+  reversion beyond it - only the latter is capturable by a real
+  FRA-vs-OIS position, because the tradeable instrument settles on a
+  *future* fix that already prices predictable catch-up.
+
+**Data.** `data/basis/*_SYNTHETIC.csv` are simulated
+(`scripts/generate_sample_basis_data.py`) so everything runs out of the
+box - do not draw market conclusions from the demo run. For the real
+thing, export two daily series and point `--fix/--ois` at them (CSV or
+Excel, flexible headers: a date column + a rate column, in percent):
+
+| Leg | Bloomberg | Free source |
+|---|---|---|
+| Euribor 3M fix | `EUR003M Index` | EMMI publishes delayed fixings; Bundesbank/ECB portals carry the series |
+| 3M €STR OIS | `EESWEC Curncy` (BGN) | no good free daily history - a 3M €STR futures strip is a workable proxy |
+
+Ideally snap the OIS near 11:00 CET to match the fixing time; failing
+that, run both `--ois-align same_day` and `prev_day` and trust only
+conclusions that survive both.
 
 ## NFP forecaster analysis & trade signal
 
@@ -166,6 +222,12 @@ python scripts/refresh_actuals.py --start 2015
 ## Project layout
 
 ```
+basis_analysis/
+  data.py        # load + align the fix and OIS legs
+  stickiness.py  # distributed-lag pass-through model, pending catch-up
+  backtest.py    # z-score events, event study, permutation nulls, P&L
+  report.py      # markdown report + charts
+  cli.py         # command-line interface
 economist_rankings/
   forecasts.py   # flexible CSV/Excel loading + column normalisation
   scoring.py     # per-forecast errors, within-release percentiles
