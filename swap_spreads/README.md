@@ -11,7 +11,8 @@ and *Run All Cells*. The last cell renders a live app with a Refresh button.
 
 ## Model
 
-1. **Factors** (all tunable in the CONFIG cell): `EUFR0CF Curncy`,
+1. **Factors** (all tunable in the CONFIG cell): `EEFOSC2 Curncy`
+   (ECB-dated ESTR OIS forward, 2nd meeting),
    Euribor–ESTR basis `(TKY2 − ER2) × 100`, `EUSS0210 Curncy` (2s10s),
    `GTDEM10Y Govt`, `MOVE Index`, `UXYAISPE Comdty`, 10y BTP–Bund
    (`DBRBTP10Y Index`, with a `GBTPGR10 − GDBR10` fallback), and 3m10y EUR
