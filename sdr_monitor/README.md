@@ -33,27 +33,33 @@ inflation) dropped.
 Needs only Python with `pandas`/`numpy` — no Bloomberg libraries.
 
 ```
-python sdr_monitor/sdr_blotter.py --csv "C:/Users/you/Downloads/sdr_export.csv" --watch
+python sdr_monitor/sdr_blotter.py --watch
 ```
 
-This writes `sdr_blotter.html`, opens it in your browser, and keeps watching
-the export file: every time you re-export from `SDR <GO>` (Rates / Vanilla
-tab → *Actions → Export*) to the same path, the page updates on its next
-auto-reload (default every 15s). The workflow is: terminal does the
-exporting, the script does the monitoring.
+With no arguments this finds the Bloomberg export drop folder automatically:
+it takes the **newest `grid*` file in `C:\blp\data`** (grid.csv, grid.xls,
+grid(1).csv … whichever the terminal wrote last). It writes
+`sdr_blotter.html`, opens it in your browser, and keeps watching: every
+re-export from `SDR <GO>` (Rates / Vanilla tab → *Actions → Export*) shows
+up on the page's next auto-reload (default every 15s) — numbered copies
+included, since the newest match is re-resolved on every poll. The workflow
+is: terminal does the exporting, the script does the monitoring.
 
 Useful flags:
 
 | Flag | Meaning |
 |---|---|
-| `--csv PATH` | export location (default: `./sdr_export.csv`, then `~/Downloads/sdr_export.csv`) |
+| `--csv PATH` | export location — a file, a folder (newest file inside), or a stem like `C:/blp/data/grid` (newest `grid*` match). Default: `./sdr_export.csv`, then `C:/blp/data/grid*`, then `~/Downloads/sdr_export.csv` |
 | `--watch` | keep running and re-render whenever the CSV changes |
 | `--demo` | synthetic prints, no export needed (page carries a DEMO badge) |
 | `--ccy` / `--exclude` | filters (default `EUR`, `TWSF,TREU,BBSF`) |
 | `--reload N` | page auto-reload seconds (0 = off) · `--out`, `--max-rows`, `--no-open` |
 
 Exports with title/preamble lines above the header are handled — the reader
-scans for the real SDR header row and sniffs the delimiter.
+scans for the real SDR header row and sniffs the delimiter. Excel-format
+grid exports (`.xls`/`.xlsx`) work too (needs `openpyxl` for xlsx, `xlrd`
+for legacy xls); Lotus `.wk1` output is rejected with a pointer to choose
+CSV/Excel in the export dialog.
 
 ## Running in BQuant (notebook)
 

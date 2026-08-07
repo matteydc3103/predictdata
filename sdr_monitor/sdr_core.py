@@ -215,6 +215,35 @@ def demo_trades(n_prints=40, seed=None):
     return pd.DataFrame(rows)
 
 
+def read_sdr_export(path):
+    """Read an SDR <GO> export in whatever format the terminal produced.
+
+    Bloomberg grid exports (C:/blp/data/grid.*) can be CSV/TXT or Excel;
+    both may carry title/timestamp preamble rows above the real header.
+    """
+    from pathlib import Path
+    path = Path(path)
+    suf = path.suffix.lower()
+    if suf in (".xls", ".xlsx", ".xlsm"):
+        try:
+            probe = pd.read_excel(path, header=None, nrows=30)
+        except ImportError:
+            raise RuntimeError(
+                "reading Excel exports needs an engine: pip install openpyxl "
+                "(for .xlsx) or xlrd (for .xls)")
+        for i, row in probe.iterrows():
+            if _looks_like_sdr(row.dropna().tolist()):
+                return pd.read_excel(path, skiprows=i)
+        raise ValueError(
+            f"could not find an SDR header row in '{path}' - expected columns "
+            "like 'Trade Time' / 'Effective Date' / 'Expiration Date'")
+    if suf == ".wk1":
+        raise ValueError(
+            f"'{path}' is a Lotus WK1 file - in the SDR export dialog choose "
+            "CSV or Excel output instead")
+    return read_sdr_csv(path)
+
+
 def read_sdr_csv(path):
     """Read an SDR <GO> export, tolerating preamble rows and odd delimiters.
 

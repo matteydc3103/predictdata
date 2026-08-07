@@ -24,14 +24,46 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sdr_core import build_table, demo_trades, format_table, read_sdr_csv
+from sdr_core import build_table, demo_trades, format_table, read_sdr_export
 
 DEFAULT_EXCLUDE = "TWSF,TREU,BBSF"
-# candidate export locations tried when --csv is not given
-DEFAULT_CSV_CANDIDATES = [
-    Path("sdr_export.csv"),
-    Path.home() / "Downloads" / "sdr_export.csv",
-]
+# Bloomberg's terminal export drop folder; grid exports land here as
+# grid.csv / grid.xls / grid(1).csv ... - we always take the newest.
+BLP_DATA_DIR = Path("C:/blp/data")
+BLP_PATTERN = "grid*"
+
+
+def _newest(folder, pattern):
+    files = [p for p in folder.glob(pattern) if p.is_file()]
+    return max(files, key=lambda p: p.stat().st_mtime) if files else None
+
+
+def resolve_export(csv_arg):
+    """Work out which export file to read *right now* (newest wins).
+
+    Accepts a file, a folder (newest file inside), or a name stem like
+    C:/blp/data/grid (newest grid* match). With no --csv at all, tries
+    ./sdr_export.csv, then C:/blp/data/grid*, then ~/Downloads/sdr_export.csv.
+    Re-run every poll so numbered re-exports are picked up automatically.
+    """
+    if csv_arg:
+        p = Path(csv_arg)
+        if p.is_file():
+            return p
+        if p.is_dir():
+            return _newest(p, "*")
+        if p.parent.is_dir():
+            return _newest(p.parent, p.name + "*")
+        return None
+    local = Path("sdr_export.csv")
+    if local.is_file():
+        return local
+    if BLP_DATA_DIR.is_dir():
+        hit = _newest(BLP_DATA_DIR, BLP_PATTERN)
+        if hit:
+            return hit
+    dl = Path.home() / "Downloads" / "sdr_export.csv"
+    return dl if dl.is_file() else None
 PKG_COLORS = ["#e8b339", "#5aa9e6", "#7fc97f", "#e78ac3", "#b39ddb"]
 
 
@@ -132,7 +164,7 @@ def generate(args, csv_path):
     if args.demo:
         raw, source = demo_trades(), "demo generator"
     else:
-        raw = read_sdr_csv(csv_path)
+        raw = read_sdr_export(csv_path)
         mtime = datetime.fromtimestamp(csv_path.stat().st_mtime).strftime("%H:%M:%S")
         source = f"{csv_path} (exported {mtime})"
     table = build_table(raw, ccy=args.ccy,
@@ -152,8 +184,10 @@ def generate(args, csv_path):
 
 def main():
     ap = argparse.ArgumentParser(description="SDR CSV export -> live HTML trade blotter")
-    ap.add_argument("--csv", help="path to the SDR <GO> export "
-                    "(default: ./sdr_export.csv, then ~/Downloads/sdr_export.csv)")
+    ap.add_argument("--csv", help="path to the SDR <GO> export - a file, a "
+                    "folder, or a stem like C:/blp/data/grid (newest match "
+                    "wins). Default: ./sdr_export.csv, then C:/blp/data/grid*, "
+                    "then ~/Downloads/sdr_export.csv")
     ap.add_argument("--demo", action="store_true", help="use synthetic demo trades")
     ap.add_argument("--ccy", default="EUR", help="currency filter (default EUR)")
     ap.add_argument("--exclude", default=DEFAULT_EXCLUDE,
@@ -172,13 +206,14 @@ def main():
 
     csv_path = None
     if not args.demo:
-        candidates = [Path(args.csv)] if args.csv else DEFAULT_CSV_CANDIDATES
-        csv_path = next((p for p in candidates if p.exists()), None)
+        csv_path = resolve_export(args.csv)
         if csv_path is None:
-            tried = "\n  ".join(str(p) for p in candidates)
-            sys.exit(f"No SDR export found. Tried:\n  {tried}\n"
+            where = args.csv or (f"./sdr_export.csv, {BLP_DATA_DIR}\\{BLP_PATTERN}, "
+                                 f"{Path.home() / 'Downloads' / 'sdr_export.csv'}")
+            sys.exit(f"No SDR export found (looked for: {where}).\n"
                      "Export from SDR <GO> (Rates / Vanilla tab, Actions > Export)\n"
                      "and pass its location with --csv, or run with --demo.")
+        print(f"using export: {csv_path}")
 
     out, n = generate(args, csv_path)
     print(f"wrote {out.resolve()} ({n} prints)")
@@ -187,23 +222,34 @@ def main():
     if not args.watch:
         return
 
-    print(f"watching {csv_path or 'demo'} - Ctrl-C to stop")
-    last = csv_path.stat().st_mtime if csv_path else None
+    if args.demo:
+        watching = "demo"
+    elif args.csv:
+        watching = args.csv
+    elif csv_path.parent == BLP_DATA_DIR:
+        watching = str(BLP_DATA_DIR / BLP_PATTERN)
+    else:
+        watching = str(csv_path)
+    print(f"watching {watching} - Ctrl-C to stop")
+    last = (csv_path, csv_path.stat().st_mtime) if csv_path else None
     try:
         while True:
             time.sleep(max(args.poll, 1))
-            if csv_path is None:               # demo mode: refresh every poll
-                generate(args, csv_path)
+            if args.demo:                      # demo mode: refresh every poll
+                generate(args, None)
                 continue
-            if not csv_path.exists():
+            # re-resolve so a new grid(2).csv beats the old grid.csv
+            cur = resolve_export(args.csv)
+            if cur is None or not cur.exists():
                 continue                       # mid-overwrite; catch it next poll
-            m = csv_path.stat().st_mtime
-            if m != last:
-                last = m
+            state = (cur, cur.stat().st_mtime)
+            if state != last:
+                last = state
                 time.sleep(0.5)                # let the export finish writing
                 try:
-                    _, n = generate(args, csv_path)
-                    print(f"{datetime.now():%H:%M:%S} refreshed ({n} prints)")
+                    _, n = generate(args, cur)
+                    print(f"{datetime.now():%H:%M:%S} refreshed from "
+                          f"{cur.name} ({n} prints)")
                 except Exception as e:
                     print(f"{datetime.now():%H:%M:%S} refresh failed: {e}")
     except KeyboardInterrupt:

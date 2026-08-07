@@ -1,13 +1,16 @@
 """SDR pipeline checks: tenor snapping (incl. business-day drift), notional
 parsing, DV01 sanity, filters, package tagging, and export-file sniffing."""
 
+import time
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from sdr_monitor.sdr_blotter import resolve_export
 from sdr_monitor.sdr_core import (approx_dv01, build_table, demo_trades,
                                   format_table, parse_notional, read_sdr_csv,
-                                  snap_tenor, year_frac)
+                                  read_sdr_export, snap_tenor, year_frac)
 
 
 # ---------- tenor ----------
@@ -116,3 +119,41 @@ def test_read_sdr_csv_no_header(tmp_path):
     p.write_text("a,b,c\n1,2,3\n")
     with pytest.raises(ValueError, match="SDR header"):
         read_sdr_csv(p)
+
+
+def test_read_sdr_export_excel_with_preamble(tmp_path):
+    pytest.importorskip("openpyxl")
+    p = tmp_path / "grid.xlsx"
+    body = demo_trades(n_prints=5, seed=1)
+    with pd.ExcelWriter(p) as xw:
+        pd.DataFrame([["SDR - Swap Data Repository"], ["As of 08/07/2026"]]) \
+            .to_excel(xw, header=False, index=False, startrow=0)
+        body.to_excel(xw, index=False, startrow=3)
+    df = read_sdr_export(p)
+    assert "Trade Time" in df.columns and len(df) == len(body)
+
+
+def test_read_sdr_export_wk1_rejected(tmp_path):
+    p = tmp_path / "grid.wk1"
+    p.write_bytes(b"\x00\x00")
+    with pytest.raises(ValueError, match="WK1"):
+        read_sdr_export(p)
+
+
+# ---------- export resolution (newest grid* wins) ----------
+def test_resolve_export_newest_grid(tmp_path):
+    import os
+    old = tmp_path / "grid.csv"
+    new = tmp_path / "grid(1).csv"
+    old.write_text("x")
+    new.write_text("y")
+    past = time.time() - 100
+    os.utime(old, (past, past))
+    # stem -> newest grid* match
+    assert resolve_export(str(tmp_path / "grid")) == new
+    # folder -> newest file inside
+    assert resolve_export(str(tmp_path)) == new
+    # exact file -> that file, even if older
+    assert resolve_export(str(old)) == old
+    # missing -> None
+    assert resolve_export(str(tmp_path / "nope" / "grid")) is None
