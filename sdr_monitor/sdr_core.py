@@ -5,7 +5,13 @@ import re
 import numpy as np
 import pandas as pd
 
-__version__ = "4"
+__version__ = "5"
+
+# venue codes -> display names (applied after the exclusion filter,
+# which always works on the raw codes)
+DEFAULT_PLATFORM_RENAME = {"BGCD": "BGC", "TPSE": "TP/ICAP",
+                           "TSEF": "TRADS", "GSEF": "GFI"}
+DEFAULT_EXCLUDE_PLATFORMS = ("TWSF", "TREU", "BBSF", "BMTF")
 
 # ---------------- tenor ----------------
 # Standard tenor grid: label -> years. Business-day adjustment (modified
@@ -126,6 +132,93 @@ def _pretty_index(code, leg2=""):
     return ""
 
 
+def _rate_decimals(r):
+    """Decimal places a rate was quoted to (fp noise stripped)."""
+    if r is None or not np.isfinite(r):
+        return 0
+    s = f"{r:.6f}".rstrip("0")
+    return len(s.split(".")[1]) if "." in s else 0
+
+
+def _gadget_note(rate, yf):
+    """Rates printed to 5dp are gadget prints: 5Y bucket up to 6y, else 10Y."""
+    if _rate_decimals(rate) >= 5:
+        return "5Y GADGET" if (np.isfinite(yf) and yf <= 6.05) else "10Y GADGET"
+    return ""
+
+
+def _index_months(label):
+    """EURIBOR 6M -> 6, ESTR -> 0 (shortest), unknown -> -1."""
+    s = str(label).upper()
+    m = re.search(r"(\d+)\s*M\b", s)
+    if m:
+        return int(m.group(1))
+    if "ESTR" in s:
+        return 0
+    return -1
+
+
+_BASIS_NAMES = {(1, 3): "3s1s", (3, 6): "3s6s", (6, 12): "6s12s"}
+
+
+def _basis_name(lo, hi):
+    if lo >= 0 and hi > 0:
+        return _BASIS_NAMES.get((lo, hi), f"{lo}s{hi}s")
+    return ""
+
+
+def _curve_name(labels):
+    """['10y','30y'] -> '10s30s'; ['7y','8y','9y'] -> '7s8s9s'.
+    Non-integer-year tenors fall back to a '/'-joined label."""
+    nums = []
+    for lab in labels:
+        m = re.fullmatch(r"(\d+)y", str(lab))
+        if not m:
+            return "/".join(str(x) for x in labels)
+        nums.append(m.group(1))
+    return "".join(f"{n}s" for n in nums)
+
+
+def _combine_group(recs):
+    """Same-timestamp legs -> one reported trade, or None if unclassifiable.
+
+    2 legs, same tenor + same notional: different index -> index basis
+    (level = higher index rate - lower); same index -> eurex/lch CCP basis
+    (level = |rate difference|). 2 legs, different tenors -> curve trade
+    (level = long - short, reported size/dv01 of the longer leg). 3 legs
+    with distinct tenors -> fly (level = 2*belly - wings, belly size/dv01).
+    """
+    recs = sorted(recs, key=lambda r: r["yf"] if np.isfinite(r["yf"]) else 0.0)
+    tenors = [r["tenor"] for r in recs]
+    if len(recs) == 2:
+        a, b = recs
+        same_tenor = tenors[0] == tenors[1]
+        same_ntl = (np.isfinite(a["notional_val"]) and np.isfinite(b["notional_val"])
+                    and np.isclose(a["notional_val"], b["notional_val"]))
+        if same_tenor and same_ntl:
+            if a["index"] != b["index"]:
+                lo, hi = sorted((a, b), key=lambda r: _index_months(r["index"]))
+                name = _basis_name(_index_months(lo["index"]),
+                                   _index_months(hi["index"]))
+                return {**a, "rate": hi["rate"] - lo["rate"], "is_spread": True,
+                        "index": f"{lo['index']} / {hi['index']}",
+                        "note": f"{name} basis".strip()}
+            return {**a, "rate": abs(a["rate"] - b["rate"]), "is_spread": True,
+                    "note": "eurex/lch"}
+        if not same_tenor:
+            s, l = recs
+            return {**l, "tenor": _curve_name(tenors),
+                    "rate": l["rate"] - s["rate"], "is_spread": True,
+                    "note": "curve"}
+        return None
+    if len(recs) == 3 and len(set(tenors)) == 3:
+        s, m, l = recs
+        return {**m, "tenor": _curve_name(tenors),
+                "rate": 2.0 * m["rate"] - s["rate"] - l["rate"],
+                "is_spread": True, "note": "fly"}
+    return None
+
+
 # Vanilla tab = fixed-float IRS (incl. ESTR OIS). Everything else out.
 _PRODUCT_EXCLUDE = ("SWAPTION", "CAP", "FLOOR", "FRA", "XCCY", "CROSS",
                     "BASIS", "INFLATION", "ZC", "EXOTIC", "CDS")
@@ -145,14 +238,14 @@ def normalize_columns(raw):
 
 
 # ---------------- pipeline ----------------
-def build_table(raw, ccy="EUR", exclude_platforms=("TWSF", "TREU", "BBSF"),
-                now=None):
+def build_table(raw, ccy="EUR", exclude_platforms=DEFAULT_EXCLUDE_PLATFORMS,
+                now=None, platform_rename=None):
     """raw trades DataFrame -> display table.
 
     Steps: normalise columns -> vanilla product filter -> currency filter ->
-    platform exclusion -> parse American-format dates -> tenor / DV01 ->
-    sort by time (newest first) -> tag same-timestamp trades as related
-    packages (P1, P2, ...).
+    platform exclusion + rename -> parse American-format dates -> tenor /
+    DV01 -> collapse same-timestamp legs into basis / eurex-lch / curve /
+    fly rows -> gadget notes on 5dp prints -> sort by time (newest first).
     """
     df = normalize_columns(raw)
     required = ["time", "effective", "maturity", "currency", "rate", "notional"]
@@ -173,9 +266,13 @@ def build_table(raw, ccy="EUR", exclude_platforms=("TWSF", "TREU", "BBSF"),
     df = df[df["currency"].astype(str).str.strip().str.upper() == ccy.upper()]
     excl = {p.strip().upper() for p in exclude_platforms}
     df = df[~df["platform"].astype(str).str.strip().str.upper().isin(excl)]
+    ren = DEFAULT_PLATFORM_RENAME if platform_rename is None else platform_rename
+    df["platform"] = df["platform"].astype(str).str.strip().map(
+        lambda p: ren.get(p.upper(), p))
     if df.empty:
-        return pd.DataFrame(columns=["tenor", "rate", "notional", "dv01",
-                                     "index", "time", "platform", "related"])
+        return pd.DataFrame(columns=["tenor", "rate", "is_spread", "notional",
+                                     "capped", "dv01", "index", "time",
+                                     "platform", "note"])
 
     # American-format dates (MM/DD/YYYY), tolerant of ISO and Excel serials
     for c in ("effective", "maturity", "time"):
@@ -231,14 +328,31 @@ def build_table(raw, ccy="EUR", exclude_platforms=("TWSF", "TREU", "BBSF"),
 
     df = df.sort_values("time", ascending=False, kind="mergesort")
 
-    # trades sharing an exact execution timestamp are related (package trades)
-    sizes = df.groupby("time")["time"].transform("size")
-    pkg_times = df.loc[sizes > 1, "time"].drop_duplicates().sort_values(ascending=False)
-    pkg_id = {t: f"P{i + 1}" for i, t in enumerate(pkg_times)}
-    df["related"] = df["time"].map(pkg_id).fillna("")
+    # same execution timestamp = one risk transfer: collapse to a single row
+    # (basis / eurex-lch / curve / fly); unclassifiable groups keep P-tags
+    rows, pkg_n = [], 0
+    for _, g in df.groupby("time", sort=False):
+        recs = g.to_dict("records")
+        combined = _combine_group(recs) if 2 <= len(recs) <= 3 else None
+        if combined is not None:
+            rows.append(combined)
+        elif len(recs) == 1:
+            r = recs[0]
+            r["note"] = _gadget_note(r["rate"], r["yf"])
+            r["is_spread"] = False
+            rows.append(r)
+        else:
+            pkg_n += 1
+            for r in recs:
+                r["note"] = f"P{pkg_n}"
+                r["is_spread"] = False
+                rows.append(r)
 
-    return df[["tenor", "rate", "notional_val", "capped", "dv01", "index",
-               "time", "platform", "related"]].rename(columns={"notional_val": "notional"})
+    out = pd.DataFrame(rows).sort_values("time", ascending=False,
+                                         kind="mergesort")
+    return out[["tenor", "rate", "is_spread", "notional_val", "capped", "dv01",
+                "index", "time", "platform", "note"]].rename(
+                    columns={"notional_val": "notional"})
 
 
 def demo_trades(n_prints=40, seed=None):
@@ -482,7 +596,10 @@ def format_table(df):
     """Numeric table -> display strings for the grid."""
     out = pd.DataFrame(index=df.index)
     out["tenor"] = df["tenor"]
-    out["rate"] = df["rate"].map(lambda r: f"{r:.4f}" if pd.notna(r) else "")
+    # combined trades (basis / curve / fly) quote a level in bp, not a rate
+    out["rate"] = ["" if pd.isna(r)
+                   else (f"{r * 100:.2f}bp" if sp else f"{r:.4f}")
+                   for r, sp in zip(df["rate"], df["is_spread"])]
     out["notional"] = [
         (f"{n / 1e6:,.0f}mm" if n >= 1e6 else f"{n:,.0f}") + ("+" if c else "")
         if pd.notna(n) else ""
@@ -494,5 +611,5 @@ def format_table(df):
     fmt = "%H:%M:%S" if same_day else "%m/%d %H:%M:%S"
     out["time"] = df["time"].dt.strftime(fmt)
     out["platform"] = df["platform"]
-    out["related"] = df["related"]
+    out["note"] = df["note"].fillna("")
     return out.reset_index(drop=True)

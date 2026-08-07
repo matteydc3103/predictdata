@@ -26,7 +26,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sdr_core import build_table, demo_trades, format_table, read_sdr_export
 
-DEFAULT_EXCLUDE = "TWSF,TREU,BBSF"
+DEFAULT_EXCLUDE = "TWSF,TREU,BBSF,BMTF"
 # Bloomberg's terminal export drop folder; grid exports land here as
 # grid.csv / grid.xls / grid(1).csv ... - we always take the newest.
 BLP_DATA_DIR = Path("C:/blp/data")
@@ -69,26 +69,29 @@ PKG_COLORS = ["#e8b339", "#5aa9e6", "#7fc97f", "#e78ac3", "#b39ddb"]
 
 def render_html(table, disp, meta):
     """Numeric table + formatted table + metadata -> full HTML document."""
-    pkg_ids = [p for p in table["related"].drop_duplicates() if p]
+    pkg_ids = [p for p in table["note"].drop_duplicates()
+               if str(p).startswith("P") and str(p)[1:].isdigit()]
     pkg_color = {p: PKG_COLORS[i % len(PKG_COLORS)] for i, p in enumerate(pkg_ids)}
 
     body_rows = []
     for (_, num), (_, row) in zip(table.iterrows(), disp.iterrows()):
-        pkg = num["related"]
         style = ""
-        if pkg:
-            c = pkg_color[pkg]
+        if num["note"] in pkg_color:              # unclassified same-time group
+            c = pkg_color[num["note"]]
             style = f' style="box-shadow: inset 3px 0 0 {c}; background:{c}14"'
+        elif num["is_spread"]:                    # basis / eurex-lch / curve / fly
+            style = ' style="box-shadow: inset 3px 0 0 #e8b339; background:#e8b33914"'
         cells = "".join(
             f'<td class="{cls}">{html.escape(str(row[col]))}</td>'
             for col, cls in (("tenor", "tenor"), ("rate", "num"),
                              ("notional", "num"), ("dv01", "num"),
                              ("index", "txt"), ("time", "time"),
-                             ("platform", "txt"), ("related", "pkg")))
+                             ("platform", "txt"), ("note", "pkg")))
         body_rows.append(f"<tr{style}>{cells}</tr>")
 
     tot_ntl = np.nansum(table["notional"].to_numpy(dtype=float))
     tot_dv01 = np.nansum(table["dv01"].to_numpy(dtype=float))
+    n_combined = int(table["is_spread"].sum())
     demo_badge = '<span class="badge demo">DEMO DATA</span>' if meta["demo"] else ""
     reload_tag = (f'<meta http-equiv="refresh" content="{meta["reload"]}">'
                   if meta["reload"] > 0 else "")
@@ -117,8 +120,13 @@ def render_html(table, disp, meta):
   thead th {{ position:sticky; top:0; background:var(--panel); color:var(--hd);
               text-align:left; font-size:11px; letter-spacing:.08em;
               text-transform:uppercase; padding:8px 14px 6px;
-              border-bottom:1px solid var(--line) }}
+              border-bottom:1px solid var(--line); z-index:1 }}
   thead th.num {{ text-align:right }}
+  thead tr.flt th {{ top:31px; padding:4px 10px 8px }}
+  thead tr.flt input {{ width:100%; box-sizing:border-box; background:var(--bg);
+              color:var(--txt); border:1px solid var(--line); border-radius:3px;
+              padding:3px 6px; font:11px "Consolas","Menlo",monospace }}
+  thead tr.flt input:focus {{ outline:none; border-color:#e8b339 }}
   td {{ padding:5px 14px; border-bottom:1px solid var(--line);
         white-space:nowrap; font-variant-numeric:tabular-nums }}
   td.num {{ text-align:right }}
@@ -131,31 +139,62 @@ def render_html(table, disp, meta):
 </head><body>
 <header>
   <h1>SDR BLOTTER — {meta['ccy']} VANILLA IRS{demo_badge}</h1>
-  <div class="sub"><b>{len(table)}</b> prints &nbsp;·&nbsp;
+  <div class="sub">showing <b id="showing">{len(table)}/{len(table)}</b> &nbsp;·&nbsp;
     Σnotional <b>{tot_ntl / 1e9:,.2f}bn</b> &nbsp;·&nbsp;
     ΣDV01 <b>{tot_dv01 / 1e3:,.0f}k</b> &nbsp;·&nbsp;
-    <b>{len(pkg_ids)}</b> packages &nbsp;·&nbsp;
+    <b>{n_combined}</b> combined (basis/curve/fly) &nbsp;·&nbsp;
     excl {html.escape(meta['exclude'])} &nbsp;·&nbsp;
     generated {meta['generated']}</div>
 </header>
 <table>
-<thead><tr>
+<thead>
+<tr>
   <th>tenor</th><th class="num">rate</th><th class="num">notional</th>
   <th class="num">dv01</th><th>index</th><th>time</th><th>platform</th>
-  <th>related</th>
-</tr></thead>
+  <th>note</th>
+</tr>
+<tr class="flt">
+  <th><input placeholder="filter"></th><th><input placeholder="filter"></th>
+  <th><input placeholder="filter"></th><th><input placeholder="filter"></th>
+  <th><input placeholder="filter"></th><th><input placeholder="filter"></th>
+  <th><input placeholder="filter"></th><th><input placeholder="filter"></th>
+</tr>
+</thead>
 <tbody>
 {chr(10).join(body_rows)}
 </tbody>
 </table>
-<footer>source: {src_line} · same-timestamp prints share a package tag (P1, P2, …)
- · dv01 is a par-annuity approximation · page reloads every {meta['reload']}s</footer>
+<footer>source: {src_line} · same-timestamp prints collapse to one trade
+ (basis / eurex-lch / curve / fly; level in bp) · GADGET = rate printed to 5dp
+ · page reloads every {meta['reload']}s</footer>
 <script>
   addEventListener('beforeunload', () => sessionStorage.setItem('sdrScroll', scrollY));
   addEventListener('load', () => {{
     const y = sessionStorage.getItem('sdrScroll');
     if (y) scrollTo(0, +y);
   }});
+
+  // per-column filters, persisted across the auto-reload
+  const inputs = [...document.querySelectorAll('thead tr.flt input')];
+  const rows = [...document.querySelectorAll('tbody tr')];
+  function applyFilters() {{
+    const terms = inputs.map(i => i.value.trim().toLowerCase());
+    sessionStorage.setItem('sdrFilters', JSON.stringify(terms));
+    let vis = 0;
+    for (const r of rows) {{
+      const cells = [...r.cells].map(c => c.textContent.toLowerCase());
+      const show = terms.every((t, i) => !t || cells[i].includes(t));
+      r.style.display = show ? '' : 'none';
+      if (show) vis++;
+    }}
+    document.getElementById('showing').textContent = vis + '/' + rows.length;
+  }}
+  inputs.forEach(i => i.addEventListener('input', applyFilters));
+  try {{
+    const saved = JSON.parse(sessionStorage.getItem('sdrFilters') || '[]');
+    inputs.forEach((i, k) => {{ if (saved[k]) i.value = saved[k]; }});
+  }} catch (e) {{}}
+  applyFilters();
 </script>
 </body></html>"""
 

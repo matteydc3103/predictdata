@@ -24,9 +24,27 @@ tick-refreshing table. Two front ends share one pipeline
 | `platform` | execution venue |
 | `related` | trades submitted at the exact same timestamp are one package — legs share a tag (`P1`, `P2`, …) |
 
-Filters: currency = **EUR** (UI-switchable); platforms **TWSF / TREU / BBSF
-excluded**; non-vanilla products (swaptions, caps/floors, FRAs, basis, XCCY,
-inflation) dropped.
+Filters: currency = **EUR** (UI-switchable); platforms **TWSF / TREU / BBSF /
+BMTF excluded**; non-vanilla products (swaptions, caps/floors, FRAs, XCCY,
+inflation) dropped. Venue codes are renamed for display: BGCD→BGC,
+TPSE→TP/ICAP, TSEF→TRADS, GSEF→GFI. The HTML blotter has a per-column
+filter row under the headers (persists across the auto-reload).
+
+## Trade classification rules
+
+Same-timestamp prints are one risk transfer and collapse to a single row,
+with the level quoted in **bp**:
+
+| Pattern | Reported as |
+|---|---|
+| 2 legs, same tenor + notional, different index | `3s6s basis` (etc.) — level = higher index rate − lower (6M−3M, 12M−6M) |
+| 2 legs, same tenor + notional + index | `eurex/lch` — level = \|rate difference\| |
+| 2 legs, different tenors | curve trade, tenor `10s30s` — level = long − short, size/dv01 of the longer leg |
+| 3 legs, distinct tenors | fly, tenor `8s9s10s` — level = 2×belly − wings, belly size/dv01 |
+| anything else at one timestamp | legs kept separate, tagged `P1`, `P2`, … |
+
+Single prints with a rate quoted to **5 decimal places** get a `GADGET`
+note: `5Y GADGET` for tenors ≤ 6y, else `10Y GADGET`.
 
 ## Running locally (HTML blotter)
 

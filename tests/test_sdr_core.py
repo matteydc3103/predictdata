@@ -64,33 +64,104 @@ def _raw(rows):
     return pd.DataFrame([{**base, **r} for r in rows])
 
 
-def test_pipeline_filters_and_packages():
+def test_pipeline_filters_and_curve_trade():
     raw = _raw([
-        {},                                                       # keep (P1 leg)
+        {"Fixed Rate": 2.512},                                    # 10y leg
         {"Expiration Date": "08/11/2031", "Fixed Rate": 2.201,
-         "Notional Amount 1": "250MM+"},                          # keep (P1 leg)
+         "Notional Amount 1": "250MM+"},                          # 5y leg, same time
         {"Trade Time": "08/07/2026 09:45:01",
          "Expiration Date": "08/13/2046", "Index": "EURIBOR 6M",
          "SEF": "TPSF"},                                          # keep, 20y
         {"Trade Time": "08/07/2026 09:50:00", "SEF": "TWSF"},     # drop venue
         {"Trade Time": "08/07/2026 09:51:00", "SEF": "BBSF"},     # drop venue
+        {"Trade Time": "08/07/2026 09:51:30", "SEF": "BMTF"},     # drop venue
         {"Trade Time": "08/07/2026 09:52:00", "Curr": "USD",
          "Index": "SOFR"},                                        # drop ccy
         {"Trade Time": "08/07/2026 09:53:00",
          "Product": "Swaption"},                                  # drop product
     ])
     t = build_table(raw, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
-    assert len(t) == 3
+    assert len(t) == 2                       # 20y single + collapsed curve trade
     assert t["time"].is_monotonic_decreasing
     assert t.iloc[0]["tenor"] == "20y"
-    assert not t["platform"].isin(["TWSF", "TREU", "BBSF"]).any()
-    pkg = t[t["related"] != ""]
-    assert len(pkg) == 2 and set(pkg["related"]) == {"P1"}
+    assert not t["platform"].isin(["TWSF", "TREU", "BBSF", "BMTF"]).any()
+
+    curve = t[t["note"] == "curve"].iloc[0]
+    assert curve["tenor"] == "5s10s"
+    assert curve["is_spread"]
+    assert abs(curve["rate"] - (2.512 - 2.201)) < 1e-9   # long minus short
+    assert curve["notional"] == 100e6                    # longer leg's size
 
     disp = format_table(t)
     assert list(disp.columns) == ["tenor", "rate", "notional", "dv01",
-                                  "index", "time", "platform", "related"]
-    assert "250mm+" in disp["notional"].values
+                                  "index", "time", "platform", "note"]
+    assert "31.10bp" in disp["rate"].values              # level shown in bp
+
+
+def test_basis_and_eurex_lch():
+    base = {"Trade Time": "08/07/2026 09:31:24", "Effective Date": "08/11/2026",
+            "Expiration Date": "08/11/2031"}
+    # same time, tenor, notional; different index -> 3s6s basis
+    raw = _raw([{**base, "Fixed Rate": 2.9890, "Index": "EUR003M"},
+                {**base, "Fixed Rate": 3.0508, "Index": "EUR006M"}])
+    t = build_table(raw, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
+    assert len(t) == 1
+    row = t.iloc[0]
+    assert row["note"] == "3s6s basis"
+    assert row["tenor"] == "5y"
+    assert abs(row["rate"] - (3.0508 - 2.9890)) < 1e-9   # 6m minus 3m
+    assert row["index"] == "EURIBOR 3M / EURIBOR 6M"
+
+    # same index too -> eurex/lch, absolute level
+    raw2 = _raw([{**base, "Fixed Rate": 3.0760, "Index": "EUR006M"},
+                 {**base, "Fixed Rate": 3.0750, "Index": "EUR006M"}])
+    t2 = build_table(raw2, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
+    assert len(t2) == 1
+    assert t2.iloc[0]["note"] == "eurex/lch"
+    assert abs(t2.iloc[0]["rate"] - 0.001) < 1e-9        # always positive
+
+
+def test_fly():
+    base = {"Trade Time": "08/07/2026 09:31:24", "Effective Date": "08/11/2026"}
+    raw = _raw([
+        {**base, "Expiration Date": "08/11/2034", "Fixed Rate": 3.10,
+         "Notional Amount 1": "40,000,000"},                       # 8y wing
+        {**base, "Expiration Date": "08/11/2035", "Fixed Rate": 3.15,
+         "Notional Amount 1": "75,000,000"},                       # 9y belly
+        {**base, "Expiration Date": "08/11/2036", "Fixed Rate": 3.18,
+         "Notional Amount 1": "35,000,000"},                       # 10y wing
+    ])
+    t = build_table(raw, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
+    assert len(t) == 1
+    row = t.iloc[0]
+    assert row["tenor"] == "8s9s10s" and row["note"] == "fly"
+    assert abs(row["rate"] - (2 * 3.15 - 3.10 - 3.18)) < 1e-9   # 2*belly - wings
+    assert row["notional"] == 75e6                               # belly size
+
+
+def test_gadget_notes():
+    raw = _raw([
+        {"Trade Time": "08/07/2026 09:01:00", "Fixed Rate": 3.17748},  # 10y 5dp
+        {"Trade Time": "08/07/2026 09:02:00", "Fixed Rate": 3.05080,
+         "Expiration Date": "08/11/2031"},                             # 5y 4dp
+        {"Trade Time": "08/07/2026 09:03:00", "Fixed Rate": 2.77701,
+         "Expiration Date": "08/11/2031"},                             # 5y 5dp
+    ])
+    t = build_table(raw, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
+    notes = dict(zip(t["time"].dt.strftime("%H:%M:%S"), t["note"]))
+    assert notes["09:01:00"] == "10Y GADGET"    # 5dp, tenor > 6y
+    assert notes["09:02:00"] == ""              # only 4dp
+    assert notes["09:03:00"] == "5Y GADGET"     # 5dp, tenor <= 6y
+
+
+def test_platform_rename():
+    raw = _raw([{"SEF": "BGCD", "Trade Time": "08/07/2026 09:01:00"},
+                {"SEF": "TPSE", "Trade Time": "08/07/2026 09:02:00"},
+                {"SEF": "TSEF", "Trade Time": "08/07/2026 09:03:00"},
+                {"SEF": "GSEF", "Trade Time": "08/07/2026 09:04:00"},
+                {"SEF": "IOIR", "Trade Time": "08/07/2026 09:05:00"}])
+    t = build_table(raw, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
+    assert set(t["platform"]) == {"BGC", "TP/ICAP", "TRADS", "GFI", "IOIR"}
 
 
 def test_pipeline_bloomberg_grid_layout():
@@ -127,6 +198,7 @@ def test_pipeline_bloomberg_grid_layout():
     assert r10["dv01"] == 131413                      # feed DV01 preferred
     assert np.isfinite(r20["dv01"]) and r20["dv01"] > 100_000  # approximated
     assert set(t["platform"]) == {"DWSF", "TPSF"}     # Platform ID mapped
+    assert (t["note"] == "").all()                    # no 5dp prints here
 
 
 @pytest.mark.parametrize("code,leg2,label", [
