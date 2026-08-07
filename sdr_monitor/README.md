@@ -1,9 +1,15 @@
-# SDR Swap Monitor (BQuant)
+# SDR Swap Monitor
 
-Live BQuant dashboard over Bloomberg's Swap Data Repository dissemination
-feed (`SDR <GO>`, asset class **Rates**, tab **Vanilla**): every vanilla
+Trade blotter over Bloomberg's Swap Data Repository dissemination feed
+(`SDR <GO>`, asset class **Rates**, tab **Vanilla**): every vanilla
 fixed-float IRS printed to the market, filtered and enriched into a
-tick-refreshing table.
+tick-refreshing table. Two front ends share one pipeline
+(`sdr_core.py`):
+
+- **`sdr_blotter.py`** — runs locally on your own machine, renders the
+  blotter to a self-refreshing **HTML page** fed by SDR CSV exports.
+- **`sdr_swap_monitor.ipynb`** — the BQuant notebook app (ipydatagrid),
+  for when the direct BQL feed entitlement is wired up.
 
 ## What it shows
 
@@ -22,7 +28,34 @@ Filters: currency = **EUR** (UI-switchable); platforms **TWSF / TREU / BBSF
 excluded**; non-vanilla products (swaptions, caps/floors, FRAs, basis, XCCY,
 inflation) dropped.
 
-## Running it
+## Running locally (HTML blotter)
+
+Needs only Python with `pandas`/`numpy` — no Bloomberg libraries.
+
+```
+python sdr_monitor/sdr_blotter.py --csv "C:/Users/you/Downloads/sdr_export.csv" --watch
+```
+
+This writes `sdr_blotter.html`, opens it in your browser, and keeps watching
+the export file: every time you re-export from `SDR <GO>` (Rates / Vanilla
+tab → *Actions → Export*) to the same path, the page updates on its next
+auto-reload (default every 15s). The workflow is: terminal does the
+exporting, the script does the monitoring.
+
+Useful flags:
+
+| Flag | Meaning |
+|---|---|
+| `--csv PATH` | export location (default: `./sdr_export.csv`, then `~/Downloads/sdr_export.csv`) |
+| `--watch` | keep running and re-render whenever the CSV changes |
+| `--demo` | synthetic prints, no export needed (page carries a DEMO badge) |
+| `--ccy` / `--exclude` | filters (default `EUR`, `TWSF,TREU,BBSF`) |
+| `--reload N` | page auto-reload seconds (0 = off) · `--out`, `--max-rows`, `--no-open` |
+
+Exports with title/preamble lines above the header are handled — the reader
+scans for the real SDR header row and sniffs the delimiter.
+
+## Running in BQuant (notebook)
 
 1. Upload `sdr_swap_monitor.ipynb` to BQuant and **Run All Cells** — the app
    is the last cell and auto-refreshes (default 30s, configurable in the UI).
@@ -41,11 +74,12 @@ BQL query) live in the single config cell.
 
 ## Structure
 
-Config → environment → core logic (pure pandas, no BQL) → data layer (one
-function per source) → UI. The core logic is BQL-free and covered by the
-local checks used during development (tenor snapping incl. business-day
-drift, capped-notional parsing, DV01 sanity, package tagging, platform and
-currency filters), so feed problems localise to the data-layer cell.
+`sdr_core.py` holds the whole pipeline (column normalisation from header
+synonyms, vanilla product filter, currency/platform filters, tenor snapping,
+DV01, package tagging, export-file sniffing) — pure pandas, no Bloomberg
+dependencies, covered by `tests/test_sdr_core.py`. The blotter script and
+the notebook are thin front ends over it (the notebook embeds a copy of the
+core so it stays a single uploadable file).
 
 ## Next iterations
 
