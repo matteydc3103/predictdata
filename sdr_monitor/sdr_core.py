@@ -218,54 +218,104 @@ def demo_trades(n_prints=40, seed=None):
 def read_sdr_export(path):
     """Read an SDR <GO> export in whatever format the terminal produced.
 
-    Bloomberg grid exports (C:/blp/data/grid.*) can be CSV/TXT or Excel;
-    both may carry title/timestamp preamble rows above the real header.
+    Bloomberg grid exports (C:/blp/data/grid.*) can be CSV/TXT, Excel, a zip
+    container wrapping either, or plain text/HTML wearing an Excel extension.
+    All variants may carry title/timestamp preamble rows above the header.
     """
     from pathlib import Path
     path = Path(path)
     suf = path.suffix.lower()
-    if suf in (".xls", ".xlsx", ".xlsm"):
-        try:
-            probe = pd.read_excel(path, header=None, nrows=30)
-        except ImportError:
-            raise RuntimeError(
-                "reading Excel exports needs an engine: pip install openpyxl "
-                "(for .xlsx) or xlrd (for .xls)")
-        for i, row in probe.iterrows():
-            if _looks_like_sdr(row.dropna().tolist()):
-                return pd.read_excel(path, skiprows=i)
-        raise ValueError(
-            f"could not find an SDR header row in '{path}' - expected columns "
-            "like 'Trade Time' / 'Effective Date' / 'Expiration Date'")
     if suf == ".wk1":
         raise ValueError(
             f"'{path}' is a Lotus WK1 file - in the SDR export dialog choose "
             "CSV or Excel output instead")
+    if suf in (".xls", ".xlsx", ".xlsm"):
+        return _read_excelish(path)
     return read_sdr_csv(path)
 
 
-def read_sdr_csv(path):
-    """Read an SDR <GO> export, tolerating preamble rows and odd delimiters.
+def _scan_excel(src):
+    """Find the SDR header row in a workbook (path or buffer) and load it."""
+    probe = pd.read_excel(src, header=None, nrows=30)
+    for i, row in probe.iterrows():
+        if _looks_like_sdr(row.dropna().tolist()):
+            if hasattr(src, "seek"):
+                src.seek(0)
+            return pd.read_excel(src, skiprows=i)
+    raise ValueError("no SDR header row found in Excel sheet")
 
-    Bloomberg exports sometimes carry title/timestamp lines above the real
-    header; scan the first rows for one containing recognisable SDR columns
-    and re-read from there. Delimiter is sniffed (comma / tab / semicolon).
-    """
+
+def _read_excelish(path):
+    """A file with an Excel extension that may not be a real workbook."""
+    import io
+    import zipfile
     try:
-        df = pd.read_csv(path, sep=None, engine="python")
+        return _scan_excel(path)
+    except ImportError:
+        raise RuntimeError(
+            "reading Excel exports needs an engine: pip install openpyxl "
+            "(for .xlsx) or xlrd (for .xls)")
+    except Exception as first_err:
+        # extension lies about the contents - try what a grid file really is
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as zf:
+                names = zf.namelist()
+                for n in names:
+                    low = n.lower()
+                    try:
+                        if low.endswith((".csv", ".txt")):
+                            text = zf.read(n).decode("utf-8-sig", errors="replace")
+                            return _read_sdr_text(text)
+                        if low.endswith((".xlsx", ".xlsm", ".xls")):
+                            return _scan_excel(io.BytesIO(zf.read(n)))
+                    except Exception:
+                        continue
+            raise ValueError(
+                f"'{path}' is a zip container with no readable table inside "
+                f"(contents: {names[:8]}) - re-export from SDR <GO> choosing "
+                "CSV output")
+        try:  # plain text / csv with a misleading extension
+            return read_sdr_csv(path)
+        except Exception:
+            pass
+        try:  # html table with a misleading extension
+            for t in pd.read_html(path, header=0):
+                if _looks_like_sdr(t.columns):
+                    return t
+        except Exception:
+            pass
+        raise ValueError(
+            f"could not parse '{path}' as an Excel workbook ({first_err}) - "
+            "re-export from SDR <GO> choosing CSV output")
+
+
+def _read_sdr_text(text):
+    """SDR table from raw text: sniff delimiter, skip preamble rows."""
+    import io
+    try:
+        df = pd.read_csv(io.StringIO(text), sep=None, engine="python")
         if _looks_like_sdr(df.columns):
             return df
     except Exception:
         pass  # ragged preamble rows - fall through to the line scan
-    with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
-        head = [fh.readline() for _ in range(30)]
-    for i, line in enumerate(head):
+    for i, line in enumerate(text.splitlines()[:30]):
         for sep in (",", "\t", ";"):
             if _looks_like_sdr(line.split(sep)):
-                return pd.read_csv(path, sep=sep, skiprows=i)
+                return pd.read_csv(io.StringIO(text), sep=sep, skiprows=i)
     raise ValueError(
-        f"could not find an SDR header row in '{path}' - expected columns "
-        "like 'Trade Time' / 'Effective Date' / 'Expiration Date'")
+        "could not find an SDR header row - expected columns like "
+        "'Trade Time' / 'Effective Date' / 'Expiration Date'")
+
+
+def read_sdr_csv(path):
+    """Read a delimited SDR <GO> export, tolerating preamble rows and odd
+    delimiters (comma / tab / semicolon)."""
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+        text = fh.read()
+    try:
+        return _read_sdr_text(text)
+    except ValueError as e:
+        raise ValueError(f"{e} (file: '{path}')")
 
 
 def _looks_like_sdr(cols):

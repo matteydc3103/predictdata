@@ -133,6 +133,24 @@ def test_read_sdr_export_excel_with_preamble(tmp_path):
     assert "Trade Time" in df.columns and len(df) == len(body)
 
 
+def test_read_sdr_export_zip_wrapping_csv(tmp_path):
+    # Bloomberg sometimes writes a zip container with an Excel extension
+    import zipfile
+    p = tmp_path / "grid.xlsx"
+    body = demo_trades(n_prints=5, seed=1).to_csv(index=False)
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("grid.csv", "SDR - Swap Data Repository\n\n" + body)
+    df = read_sdr_export(p)
+    assert "Trade Time" in df.columns and len(df) == 5
+
+
+def test_read_sdr_export_csv_named_xls(tmp_path):
+    p = tmp_path / "grid.xls"
+    p.write_text(demo_trades(n_prints=5, seed=1).to_csv(index=False))
+    df = read_sdr_export(p)
+    assert "Trade Time" in df.columns and len(df) == 5
+
+
 def test_read_sdr_export_wk1_rejected(tmp_path):
     p = tmp_path / "grid.wk1"
     p.write_bytes(b"\x00\x00")
