@@ -1,9 +1,11 @@
 """Core SDR parsing/compute logic, shared by the local blotter and the
 BQuant notebook (which embeds a copy so it stays a single uploadable file)."""
+import re
+
 import numpy as np
 import pandas as pd
 
-__version__ = "3"
+__version__ = "4"
 
 # ---------------- tenor ----------------
 # Standard tenor grid: label -> years. Business-day adjustment (modified
@@ -101,7 +103,28 @@ _COL_SYNONYMS = {
     "product":   ["product", "type", "taxonomy", "asset class", "contract type",
                   "instrument"],
     "dv01":      ["dv01", "dv01 (usd)", "dv01(usd)", "risk"],
+    "leg2":      ["leg 2", "leg2", "underlier id 2"],
 }
+
+def _pretty_index(code, leg2=""):
+    """Readable floating-index label: EUR006M -> 'EURIBOR 6M'; fall back to
+    the Leg 2 description when the index code cell is empty."""
+    s = "" if code is None or (isinstance(code, float) and np.isnan(code)) \
+        else str(code).strip().upper()
+    m = re.fullmatch(r"EUR(\d{3})M", s)
+    if m:
+        return f"EURIBOR {int(m.group(1))}M"
+    if "ESTR" in s or "EUROSTR" in s:
+        return "ESTR"
+    if s and s != "NAN":
+        return s
+    l2 = str(leg2).upper()
+    if "EURIBOR" in l2:
+        return "EURIBOR"
+    if "STR" in l2:
+        return "ESTR"
+    return ""
+
 
 # Vanilla tab = fixed-float IRS (incl. ESTR OIS). Everything else out.
 _PRODUCT_EXCLUDE = ("SWAPTION", "CAP", "FLOOR", "FRA", "XCCY", "CROSS",
@@ -202,6 +225,9 @@ def build_table(raw, ccy="EUR", exclude_platforms=("TWSF", "TREU", "BBSF"),
         df["dv01"] = feed.where(feed.notna(), approx)
     else:
         df["dv01"] = approx
+
+    leg2 = df["leg2"] if "leg2" in df.columns else pd.Series("", index=df.index)
+    df["index"] = [_pretty_index(i, l) for i, l in zip(df["index"], leg2)]
 
     df = df.sort_values("time", ascending=False, kind="mergesort")
 
@@ -463,7 +489,7 @@ def format_table(df):
         for n, c in zip(df["notional"], df["capped"])
     ]
     out["dv01"] = df["dv01"].map(lambda d: f"{d:,.0f}" if pd.notna(d) else "")
-    out["index"] = df["index"]
+    out["index"] = df["index"].fillna("")
     same_day = df["time"].dt.normalize().nunique() <= 1
     fmt = "%H:%M:%S" if same_day else "%m/%d %H:%M:%S"
     out["time"] = df["time"].dt.strftime(fmt)

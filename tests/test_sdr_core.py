@@ -129,6 +129,21 @@ def test_pipeline_bloomberg_grid_layout():
     assert set(t["platform"]) == {"DWSF", "TPSF"}     # Platform ID mapped
 
 
+@pytest.mark.parametrize("code,leg2,label", [
+    ("EUR006M", "", "EURIBOR 6M"),
+    ("EUR003M", "", "EURIBOR 3M"),
+    ("EUR012M", "", "EURIBOR 12M"),
+    (float("nan"), "EUR-EURIBOR-Reuters", "EURIBOR"),
+    (float("nan"), "EUR-EuroSTR-COMPOUND", "ESTR"),
+    ("ESTR", "", "ESTR"),
+    ("SOFR", "", "SOFR"),
+    (float("nan"), "", ""),
+])
+def test_pretty_index(code, leg2, label):
+    from sdr_monitor.sdr_core import _pretty_index
+    assert _pretty_index(code, leg2) == label
+
+
 def test_demo_roundtrip():
     t = build_table(demo_trades(seed=7))
     assert len(t) > 0
