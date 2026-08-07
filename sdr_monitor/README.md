@@ -33,7 +33,10 @@ filter row under the headers (persists across the auto-reload).
 ## Trade classification rules
 
 Same-timestamp prints are one risk transfer and collapse to a single row,
-with the level quoted in **bp**:
+with the level quoted in **bp**. First, legs with identical tenor + index +
+rate at one second merge as clips of the same trade (sizes and dv01 sum —
+e.g. four 30y prints, 2×25mm at each of two levels, become one 50mm
+eurex/lch). Then:
 
 | Pattern | Reported as |
 |---|---|

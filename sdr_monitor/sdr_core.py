@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-__version__ = "5"
+__version__ = "6"
 
 # venue codes -> display names (applied after the exclusion filter,
 # which always works on the raw codes)
@@ -179,6 +179,26 @@ def _curve_name(labels):
     return "".join(f"{n}s" for n in nums)
 
 
+def _merge_clips(recs):
+    """Same-timestamp legs with identical tenor/index/rate are one trade
+    printed in clips - merge them, summing size and dv01.
+
+    E.g. four 30y prints at one second, 2x25mm @3.2860 + 2x25mm @3.2815,
+    reduce to two 50mm legs which then classify as one eurex/lch at 0.45bp.
+    """
+    merged = {}
+    for r in recs:
+        key = (r["tenor"], r["index"], r["rate"])
+        if key in merged:
+            m = merged[key]
+            m["notional_val"] = np.nansum([m["notional_val"], r["notional_val"]])
+            m["dv01"] = np.nansum([m["dv01"], r["dv01"]])
+            m["capped"] = bool(m["capped"]) or bool(r["capped"])
+        else:
+            merged[key] = dict(r)
+    return list(merged.values())
+
+
 def _combine_group(recs):
     """Same-timestamp legs -> one reported trade, or None if unclassifiable.
 
@@ -332,7 +352,7 @@ def build_table(raw, ccy="EUR", exclude_platforms=DEFAULT_EXCLUDE_PLATFORMS,
     # (basis / eurex-lch / curve / fly); unclassifiable groups keep P-tags
     rows, pkg_n = [], 0
     for _, g in df.groupby("time", sort=False):
-        recs = g.to_dict("records")
+        recs = _merge_clips(g.to_dict("records"))
         combined = _combine_group(recs) if 2 <= len(recs) <= 3 else None
         if combined is not None:
             rows.append(combined)

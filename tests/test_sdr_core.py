@@ -139,6 +139,33 @@ def test_fly():
     assert row["notional"] == 75e6                               # belly size
 
 
+def test_clips_merge_to_eurex_lch():
+    # four 30y prints at one second: 2x25mm @3.2860 + 2x25mm @3.2815
+    # -> two 50mm legs -> one eurex/lch row, 50mm at 0.45bp
+    base = {"Trade Time": "08/07/2026 09:48:53", "Effective Date": "08/11/2026",
+            "Expiration Date": "08/11/2056", "Index": "EUR006M",
+            "Notional Amount 1": "25,000,000"}
+    raw = _raw([{**base, "Fixed Rate": 3.2860}, {**base, "Fixed Rate": 3.2860},
+                {**base, "Fixed Rate": 3.2815}, {**base, "Fixed Rate": 3.2815}])
+    t = build_table(raw, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
+    assert len(t) == 1
+    row = t.iloc[0]
+    assert row["note"] == "eurex/lch" and row["tenor"] == "30y"
+    assert row["notional"] == 50e6
+    assert abs(row["rate"] - 0.0045) < 1e-9            # 0.45bp
+
+
+def test_clips_merge_single_trade():
+    # two identical prints at one second are one trade in two clips
+    base = {"Trade Time": "08/07/2026 09:10:00", "Fixed Rate": 2.512,
+            "Notional Amount 1": "25,000,000"}
+    raw = _raw([dict(base), dict(base)])
+    t = build_table(raw, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
+    assert len(t) == 1
+    assert t.iloc[0]["notional"] == 50e6
+    assert not t.iloc[0]["is_spread"]
+
+
 def test_gadget_notes():
     raw = _raw([
         {"Trade Time": "08/07/2026 09:01:00", "Fixed Rate": 3.17748},  # 10y 5dp
