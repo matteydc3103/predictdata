@@ -93,6 +93,42 @@ def test_pipeline_filters_and_packages():
     assert "250mm+" in disp["notional"].values
 
 
+def test_pipeline_bloomberg_grid_layout():
+    """Exact column layout observed in a real C:/blp/data grid.xlsx export."""
+    raw = pd.DataFrame({
+        "Type":        ["IRS", "IRS", "Swaption"],
+        "Code":        ["A1", "A2", "A3"],
+        "Effective":   ["08/11/2026"] * 3,
+        "Expiration":  ["08/11/2036", "08/13/2046", "08/11/2036"],
+        "Rate 1":      [2.512, None, 1.0],
+        "Leg 1":       ["FIXED", "EUESTR", "X"],
+        "Rate 2":      [None, 2.688, None],
+        "Leg 2":       ["EUESTR", "FIXED", "X"],
+        "Curr":        ["EUR", "EUR", "EUR"],
+        "Not.":        ["150", "250", "75"],          # quoted in millions
+        "Unnamed: 10": [None, "+", None],             # capped marker column
+        "Cleared":     ["C", "C", "C"],
+        "Src":         ["DTCC", "DTCC", "DTCC"],
+        "Platform ID": ["DWSF", "TPSF", "DWSF"],
+        "Trade Time":  ["08/07/2026 09:31:24", "08/07/2026 09:45:01",
+                        "08/07/2026 09:50:00"],
+        "Fixed PF 1":  ["A", "A", "A"],
+        "DV01":        ["131,413", None, "10"],
+        "Index":       ["ESTR", "ESTR", "ESTR"],
+    })
+    t = build_table(raw, ccy="EUR", now=pd.Timestamp("2026-08-07 10:00"))
+    assert len(t) == 2                                # swaption dropped
+    r10 = t[t["tenor"] == "10y"].iloc[0]
+    r20 = t[t["tenor"] == "20y"].iloc[0]
+    assert r10["rate"] == 2.512                       # from Rate 1
+    assert r20["rate"] == 2.688                       # coalesced from Rate 2
+    assert r10["notional"] == 150e6                   # millions heuristic
+    assert r20["capped"] and not r10["capped"]        # '+' marker column
+    assert r10["dv01"] == 131413                      # feed DV01 preferred
+    assert np.isfinite(r20["dv01"]) and r20["dv01"] > 100_000  # approximated
+    assert set(t["platform"]) == {"DWSF", "TPSF"}     # Platform ID mapped
+
+
 def test_demo_roundtrip():
     t = build_table(demo_trades(seed=7))
     assert len(t) > 0

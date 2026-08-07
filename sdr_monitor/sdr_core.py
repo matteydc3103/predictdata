@@ -3,6 +3,8 @@ BQuant notebook (which embeds a copy so it stays a single uploadable file)."""
 import numpy as np
 import pandas as pd
 
+__version__ = "3"
+
 # ---------------- tenor ----------------
 # Standard tenor grid: label -> years. Business-day adjustment (modified
 # following) and T+2 effective dates mean the raw day count is rarely an exact
@@ -87,14 +89,18 @@ _COL_SYNONYMS = {
     "maturity":  ["expiration date", "maturity date", "end date", "maturity",
                   "expiration", "expiry", "mat date"],
     "currency":  ["currency", "curr", "ccy", "notional currency", "notional currency 1"],
-    "rate":      ["rate", "fixed rate", "fixed rate 1", "price", "strike", "coupon"],
-    "notional":  ["notional", "notional amount", "notional amount 1", "notional 1", "amount"],
+    "rate":      ["rate", "fixed rate", "fixed rate 1", "rate 1", "rate1",
+                  "price", "strike", "coupon"],
+    "rate2":     ["rate 2", "rate2", "fixed rate 2", "spread"],
+    "notional":  ["notional", "notional amount", "notional amount 1", "notional 1",
+                  "not.", "not", "amount", "amt"],
     "index":     ["index", "underlying", "floating rate index", "leg 2 index",
                   "reference rate", "underlier id", "und"],
-    "platform":  ["platform", "sef", "exec venue", "execution venue", "venue",
-                  "dissemination venue", "source", "dissem"],
+    "platform":  ["platform", "platform id", "sef", "exec venue", "execution venue",
+                  "venue", "dissemination venue", "source", "dissem"],
     "product":   ["product", "type", "taxonomy", "asset class", "contract type",
                   "instrument"],
+    "dv01":      ["dv01", "dv01 (usd)", "dv01(usd)", "risk"],
 }
 
 # Vanilla tab = fixed-float IRS (incl. ESTR OIS). Everything else out.
@@ -153,17 +159,49 @@ def build_table(raw, ccy="EUR", exclude_platforms=("TWSF", "TREU", "BBSF"),
         df[c] = _to_datetime_smart(df[c])
     df = df.dropna(subset=["time", "effective", "maturity"])
 
+    # the fixed rate sits in whichever leg is fixed - coalesce Rate 1 / Rate 2
     df["rate"] = pd.to_numeric(df["rate"], errors="coerce")
+    if "rate2" in df.columns:
+        df["rate"] = df["rate"].fillna(pd.to_numeric(df["rate2"], errors="coerce"))
+
     parsed = df["notional"].map(parse_notional)
     df["notional_val"] = [p[0] for p in parsed]
     df["capped"] = [p[1] for p in parsed]
+
+    # some grid layouts put the capped marker in its own (unnamed) column of '+'
+    for c in df.columns:
+        if c in _COL_SYNONYMS or c in ("notional_val", "capped"):
+            continue
+        vals = df[c].dropna().astype(str).str.strip()
+        vals = vals[vals != ""]
+        if len(vals) and (vals == "+").all():
+            df["capped"] = df["capped"] | (df[c].astype(str).str.strip() == "+")
+
+    # grids may quote notional in millions ('150') or thousands ('150,000');
+    # a real swap-blotter median below these cutoffs is implausible
+    med = df["notional_val"].median()
+    if pd.notna(med) and med > 0:
+        if med < 10_000:
+            df["notional_val"] = df["notional_val"] * 1e6
+        elif med < 1_000_000:
+            df["notional_val"] = df["notional_val"] * 1e3
 
     now = now or pd.Timestamp.now()
     df["yf"] = [year_frac(e, m) for e, m in zip(df["effective"], df["maturity"])]
     df["fwd_years"] = ((df["effective"] - now).dt.days / 365.25).clip(lower=0.0)
     df["tenor"] = df["yf"].map(snap_tenor)
-    df["dv01"] = [approx_dv01(n, r, t, f) for n, r, t, f in
-                  zip(df["notional_val"], df["rate"], df["yf"], df["fwd_years"])]
+
+    # prefer the feed's own DV01 where present; approximate the gaps
+    approx = pd.Series([approx_dv01(n, r, t, f) for n, r, t, f in
+                        zip(df["notional_val"], df["rate"], df["yf"],
+                            df["fwd_years"])], index=df.index)
+    if "dv01" in df.columns:
+        feed = pd.to_numeric(
+            df["dv01"].astype(str).str.replace(",", "", regex=False),
+            errors="coerce").abs()
+        df["dv01"] = feed.where(feed.notna(), approx)
+    else:
+        df["dv01"] = approx
 
     df = df.sort_values("time", ascending=False, kind="mergesort")
 
@@ -371,6 +409,9 @@ def _to_datetime_smart(s):
     num = pd.to_numeric(s, errors="coerce")
     if num.between(20000, 90000).mean() > 0.8:      # ~1954..2146
         return pd.to_datetime(num, unit="D", origin="1899-12-30")
+    if num.between(0, 1, inclusive="neither").mean() > 0.8:
+        # bare time-of-day serials: fraction of a day, assume today
+        return pd.Timestamp.now().normalize() + pd.to_timedelta(num, unit="D")
     return pd.to_datetime(s, errors="coerce", dayfirst=False)
 
 
