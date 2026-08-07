@@ -151,6 +151,36 @@ def test_read_sdr_export_csv_named_xls(tmp_path):
     assert "Trade Time" in df.columns and len(df) == 5
 
 
+def test_read_sdr_export_nonstandard_workbook_members(tmp_path):
+    # Bloomberg grid.xlsx observed in the wild: real workbook, but internals
+    # named xl/workbook2.xml / sheet2.xml, which defeats pandas' sniffing
+    import zipfile
+    pytest.importorskip("openpyxl")
+    normal = tmp_path / "normal.xlsx"
+    body = demo_trades(n_prints=5, seed=1)
+    with pd.ExcelWriter(normal) as xw:
+        body.to_excel(xw, index=False)
+    weird = tmp_path / "grid.xlsx"
+    ren = {"xl/workbook.xml": "xl/workbook2.xml",
+           "xl/_rels/workbook.xml.rels": "xl/_rels/workbook2.xml.rels",
+           "xl/worksheets/sheet1.xml": "xl/worksheets/sheet2.xml"}
+    with zipfile.ZipFile(normal) as zin, zipfile.ZipFile(weird, "w") as zout:
+        for item in zin.namelist():
+            zout.writestr(ren.get(item, item), zin.read(item))
+    df = read_sdr_export(weird)
+    assert "Trade Time" in df.columns and len(df) == len(body)
+
+
+def test_to_datetime_smart_serials():
+    from sdr_monitor.sdr_core import _to_datetime_smart
+    s = pd.Series(["46245.39683", "46245", "46260"])   # excel day serials
+    out = _to_datetime_smart(s)
+    assert out.iloc[1] == pd.Timestamp("2026-08-11")
+    assert out.iloc[0].strftime("%H:%M") == "09:31"
+    plain = _to_datetime_smart(pd.Series(["08/11/2026", "08/12/2026"]))
+    assert plain.iloc[0] == pd.Timestamp("2026-08-11")
+
+
 def test_read_sdr_export_wk1_rejected(tmp_path):
     p = tmp_path / "grid.wk1"
     p.write_bytes(b"\x00\x00")

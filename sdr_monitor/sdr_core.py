@@ -148,10 +148,9 @@ def build_table(raw, ccy="EUR", exclude_platforms=("TWSF", "TREU", "BBSF"),
         return pd.DataFrame(columns=["tenor", "rate", "notional", "dv01",
                                      "index", "time", "platform", "related"])
 
-    # American-format dates (MM/DD/YYYY), tolerant of ISO too
-    for c in ("effective", "maturity"):
-        df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=False)
-    df["time"] = pd.to_datetime(df["time"], errors="coerce", dayfirst=False)
+    # American-format dates (MM/DD/YYYY), tolerant of ISO and Excel serials
+    for c in ("effective", "maturity", "time"):
+        df[c] = _to_datetime_smart(df[c])
     df = df.dropna(subset=["time", "effective", "maturity"])
 
     df["rate"] = pd.to_numeric(df["rate"], errors="coerce")
@@ -234,14 +233,15 @@ def read_sdr_export(path):
     return read_sdr_csv(path)
 
 
-def _scan_excel(src):
+def _scan_excel(src, engine=None):
     """Find the SDR header row in a workbook (path or buffer) and load it."""
-    probe = pd.read_excel(src, header=None, nrows=30)
+    kw = {"engine": engine} if engine else {}
+    probe = pd.read_excel(src, header=None, nrows=30, **kw)
     for i, row in probe.iterrows():
         if _looks_like_sdr(row.dropna().tolist()):
             if hasattr(src, "seek"):
                 src.seek(0)
-            return pd.read_excel(src, skiprows=i)
+            return pd.read_excel(src, skiprows=i, **kw)
     raise ValueError("no SDR header row found in Excel sheet")
 
 
@@ -258,6 +258,16 @@ def _read_excelish(path):
     except Exception as first_err:
         # extension lies about the contents - try what a grid file really is
         if zipfile.is_zipfile(path):
+            # Bloomberg workbooks can use nonstandard member names
+            # (xl/workbook2.xml), which defeats pandas' format sniffing but
+            # not openpyxl itself - force the engine to skip the sniff
+            try:
+                return _scan_excel(path, engine="openpyxl")
+            except ImportError:
+                raise RuntimeError(
+                    "this export is an Excel workbook - pip install openpyxl")
+            except Exception:
+                pass
             with zipfile.ZipFile(path) as zf:
                 names = zf.namelist()
                 for n in names:
@@ -270,6 +280,10 @@ def _read_excelish(path):
                             return _scan_excel(io.BytesIO(zf.read(n)))
                     except Exception:
                         continue
+            try:
+                return _parse_xlsx_xml(path)
+            except Exception:
+                pass
             raise ValueError(
                 f"'{path}' is a zip container with no readable table inside "
                 f"(contents: {names[:8]}) - re-export from SDR <GO> choosing "
@@ -287,6 +301,77 @@ def _read_excelish(path):
         raise ValueError(
             f"could not parse '{path}' as an Excel workbook ({first_err}) - "
             "re-export from SDR <GO> choosing CSV output")
+
+
+def _parse_xlsx_xml(path):
+    """Last resort: read the worksheet XML straight out of the zip.
+
+    Copes with workbooks whose internal member names/relationships are
+    nonstandard enough that both pandas and openpyxl refuse them, as long
+    as a worksheets/*.xml part and (optionally) sharedStrings.xml exist.
+    """
+    import re
+    import zipfile
+    import xml.etree.ElementTree as ET
+    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with zipfile.ZipFile(path) as zf:
+        shared = []
+        for n in zf.namelist():
+            if n.lower().endswith("sharedstrings.xml"):
+                root = ET.fromstring(zf.read(n))
+                shared = ["".join(t.text or "" for t in si.iter(ns + "t"))
+                          for si in root.iter(ns + "si")]
+                break
+        sheets = sorted(n for n in zf.namelist()
+                        if re.search(r"worksheets/[^/]+\.xml$", n, re.I))
+        if not sheets:
+            raise ValueError("no worksheet xml inside container")
+        root = ET.fromstring(zf.read(sheets[0]))
+
+    rows = []
+    for row in root.iter(ns + "row"):
+        cells = {}
+        for c in row.iter(ns + "c"):
+            m = re.match(r"[A-Z]+", c.get("r", ""))
+            if m:
+                idx = 0
+                for ch in m.group():
+                    idx = idx * 26 + ord(ch) - 64
+                idx -= 1
+            else:
+                idx = len(cells)
+            v = c.find(ns + "v")
+            if c.get("t") == "s" and v is not None:
+                si = int(v.text)
+                cells[idx] = shared[si] if si < len(shared) else None
+            elif c.get("t") == "inlineStr":
+                is_el = c.find(ns + "is")
+                cells[idx] = ("".join(t.text or "" for t in is_el.iter(ns + "t"))
+                              if is_el is not None else None)
+            else:
+                cells[idx] = v.text if v is not None else None
+        if cells:
+            rows.append([cells.get(i) for i in range(max(cells) + 1)])
+    if not rows:
+        raise ValueError("worksheet xml holds no rows")
+
+    width = max(len(r) for r in rows)
+    rows = [r + [None] * (width - len(r)) for r in rows]
+    for i, r in enumerate(rows[:30]):
+        if _looks_like_sdr([x for x in r if x]):
+            cols = [str(x) if x is not None else f"col{j}"
+                    for j, x in enumerate(r)]
+            return pd.DataFrame(rows[i + 1:], columns=cols)
+    raise ValueError("no SDR header row found in worksheet xml")
+
+
+def _to_datetime_smart(s):
+    """Datetimes from strings OR Excel serial numbers (workbook cells store
+    dates as day counts from 1899-12-30; times are the fraction)."""
+    num = pd.to_numeric(s, errors="coerce")
+    if num.between(20000, 90000).mean() > 0.8:      # ~1954..2146
+        return pd.to_datetime(num, unit="D", origin="1899-12-30")
+    return pd.to_datetime(s, errors="coerce", dayfirst=False)
 
 
 def _read_sdr_text(text):
