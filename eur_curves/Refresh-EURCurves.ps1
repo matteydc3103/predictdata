@@ -31,7 +31,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Log([string]$msg) {
-    Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $msg)
+    $line = "[{0:dd-MM-yyyy HH:mm:ss}] {1}" -f (Get-Date), $msg
+    Write-Host $line
+    try {   # also keep a log file, so unattended (scheduled) runs can be checked afterwards
+        if (-not (Test-Path -LiteralPath $SnapFolder)) { New-Item -ItemType Directory -Path $SnapFolder | Out-Null }
+        Add-Content -LiteralPath (Join-Path $SnapFolder 'EURCurves refresh log.txt') -Value $line
+    } catch {}
 }
 
 # Retry a COM call while Excel is busy (calculating / in a dialog / cell being edited).
