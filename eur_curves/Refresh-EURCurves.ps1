@@ -106,17 +106,29 @@ function Get-Sheet($wb, [string]$name) {
 # Wait until Excel has finished calculating and no cell on the tab is still waiting for data.
 function Wait-SheetReady($app, $ws) {
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
-    $stable = 0
+    $stable = 0; $errors = 0; $lastNote = Get-Date
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 5
+        $why = ''
         try {
-            $calcDone = ($app.CalculationState -eq 0)                                         # xlDone
-            $pending  = $ws.UsedRange.Find('Requesting Data', [Type]::Missing, -4163, 2)      # xlValues, xlPart
-        } catch { $stable = 0; continue }                                                     # Excel busy
-        if ($calcDone -and $null -eq $pending) {
+            # Only "calculating" (1) counts as busy. "Pending" (2) is normal in manual-calculation
+            # workbooks, where the other tabs are still waiting to be recalculated.
+            if ($app.CalculationState -eq 1) { $why = 'Excel is still calculating' }
+            elseif ($null -ne $ws.UsedRange.Find('Requesting Data', [Type]::Missing, -4163, 2)) {   # xlValues, xlPart
+                $why = 'cells are still showing "Requesting Data"'
+            }
+            $errors = 0
+        } catch {
+            $errors++; $why = "Excel is busy ($($_.Exception.Message))"
+            if ($errors -ge 60) { throw "Cannot check tab '$($ws.Name)': $($_.Exception.Message)" }
+        }
+        if (-not $why) {
             $stable++
             if ($stable -ge 2) { return }
-        } else { $stable = 0 }
+        } else {
+            $stable = 0
+            if (((Get-Date) - $lastNote).TotalMinutes -ge 2) { Log "  still waiting on '$($ws.Name)': $why"; $lastNote = Get-Date }
+        }
     }
     throw "Tab '$($ws.Name)' did not finish refreshing within $TimeoutMinutes minutes."
 }
@@ -295,6 +307,6 @@ try {
     Log 'All done.'
 }
 catch {
-    Log "ERROR: $($_.Exception.Message)"
+    Log "ERROR: $($_.Exception.Message)  [script line $($_.InvocationInfo.ScriptLineNumber)]"
     exit 1
 }
