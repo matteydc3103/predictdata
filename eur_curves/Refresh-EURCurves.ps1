@@ -30,6 +30,7 @@ param(
     # Optional: name of a macro that refreshes the active sheet, run before the recalculation.
     # e.g. 'RefreshEntireWorksheet' for Bloomberg. Leave empty to just recalculate the tab.
     [string]$RefreshMacro   = '',
+    [int]$AddInWaitSeconds  = 30,                            # pause after opening, for data add-ins to connect
     [switch]$FrasOnly,
     [switch]$SnapNow,
     [switch]$Compare,
@@ -66,32 +67,50 @@ function Find-Workbook($app) {
     return $null
 }
 
-# Attach to the Excel the user already has open (so add-ins are loaded). If the workbook is not
-# open, open it the normal way (as if double-clicked) and then attach.
+# Get the workbook. If it is already open in Excel, use that. Otherwise start Excel ourselves,
+# load the installed add-ins (Excel does not load them on its own when started by a script) and
+# open the workbook. Nothing needs to be open beforehand.
 function Get-ExcelWorkbook {
-    $app = $null
-    try { $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application') } catch {}
-    if ($app) {
-        $wb = Invoke-Excel { Find-Workbook $app } 5
-        if ($wb) { Log "Using already-open workbook $($wb.Name)"; return $wb }
+    if ($script:CachedWb) {                                   # workbook we already found in this run
+        try { $null = $script:CachedWb.Name; return $script:CachedWb } catch { $script:CachedWb = $null }
+    }
+
+    try {
+        $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
+        $wb  = Invoke-Excel { Find-Workbook $app } 5
+        if ($wb) { Log "Using already-open workbook $($wb.Name)"; $script:CachedWb = $wb; return $wb }
+        Log "Excel is running but $WorkbookName is not open in it - starting a separate Excel."
+    } catch {
+        Log "No running Excel found - starting Excel."
     }
 
     $file = Get-ChildItem -LiteralPath $WorkbookFolder -Filter "$WorkbookName.xls*" |
             Where-Object { $_.Name -notlike '~$*' } | Select-Object -First 1
     if (-not $file) { throw "Cannot find $WorkbookName.xls* in $WorkbookFolder" }
 
-    Log "Opening $($file.FullName)"
-    Start-Process -FilePath $file.FullName
-    $deadline = (Get-Date).AddMinutes(5)
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 5
-        try {
-            $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
-            $wb = Find-Workbook $app
-            if ($wb) { Start-Sleep -Seconds 15; return $wb }   # give add-ins time to load
-        } catch {}
+    $app = New-Object -ComObject Excel.Application
+    $app.Visible = $true
+    $app.UserControl = $true                                  # keep Excel open after the script ends
+    $app.DisplayAlerts = $false
+    try {
+        # Re-tick every installed add-in so it actually loads (needs a workbook open to work).
+        $tmp = $app.Workbooks.Add()
+        foreach ($ai in $app.AddIns) {
+            try {
+                if ($ai.Installed) { $ai.Installed = $false; $ai.Installed = $true; Log "  loaded add-in $($ai.Name)" }
+            } catch { Log "  could not load add-in $($ai.Name): $($_.Exception.Message)" }
+        }
+        $tmp.Close($false)
+
+        Log "Opening $($file.FullName)"
+        $wb = $app.Workbooks.Open($file.FullName)
+    } finally {
+        $app.DisplayAlerts = $true
     }
-    throw "Opened $($file.Name) but could not attach to it in Excel within 5 minutes."
+    Log "Giving add-ins $AddInWaitSeconds seconds to connect ..."
+    Start-Sleep -Seconds $AddInWaitSeconds
+    $script:CachedWb = $wb
+    return $wb
 }
 
 function Get-Sheet($wb, [string]$name) {
@@ -151,6 +170,11 @@ function Refresh-Sheet($wb, [string]$name) {
     Invoke-Excel { $ws.Calculate() } | Out-Null
 
     Wait-SheetReady $app $ws
+    try {
+        if ($null -ne $ws.UsedRange.Find('#NAME?', [Type]::Missing, -4163, 2)) {
+            Log "  WARNING: '$($ws.Name)' contains #NAME? errors - a data add-in is probably not loaded."
+        }
+    } catch {}
     Log ("'{0}' done in {1:n1} min" -f $ws.Name, $sw.Elapsed.TotalMinutes)
 }
 
