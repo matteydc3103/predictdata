@@ -30,6 +30,13 @@ param(
     # Optional: name of a macro that refreshes the active sheet, run before the recalculation.
     # e.g. 'RefreshEntireWorksheet' for Bloomberg. Leave empty to just recalculate the tab.
     [string]$RefreshMacro   = '',
+    # Sensitivity label put on every file the script saves. The label's ID is picked up automatically
+    # from EURCurves_Demo (or an earlier snap) when that file carries a label with this name.
+    # If it does not, set the ID here - run the script with -ShowLabel "<path to a file labelled Internal>" to get it.
+    [string]$SensitivityLabelName = 'Internal',
+    [string]$SensitivityLabelId   = '',
+    [string]$SensitivitySiteId    = '',
+    [string]$ShowLabel            = '',
     [switch]$DirtyCellsOnly,                                 # only recalc changed cells (plain Shift+F9) instead of the whole tab
     [int]$AddInWaitSeconds  = 30,                            # pause after opening, for data add-ins to connect
     [switch]$FrasOnly,
@@ -193,6 +200,41 @@ function Refresh-Sheet($wb, [string]$name) {
     Log ("'{0}' done in {1:n1} min" -f $ws.Name, $sw.Elapsed.TotalMinutes)
 }
 
+# ----------------------------------- sensitivity label ---------------------------------------
+# Remember the label ID / tenant ID from a workbook that already carries the wanted label.
+function Read-Label($wb) {
+    try {
+        $l = $wb.SensitivityLabel.GetLabel()
+        if (-not $l.LabelId) { return }
+        if (-not $script:SiteId) { $script:SiteId = $l.SiteId }
+        if (-not $script:LabelId -and $l.LabelName -like "*$SensitivityLabelName*") {
+            $script:LabelId = $l.LabelId; $script:LabelName = $l.LabelName
+        }
+    } catch {}
+}
+
+# Label a new workbook before it is saved, so Excel does not ask for one.
+function Set-Label($wb) {
+    $id   = if ($SensitivityLabelId) { $SensitivityLabelId } else { $script:LabelId }
+    $name = if ($script:LabelName)   { $script:LabelName }   else { $SensitivityLabelName }
+    $site = if ($SensitivitySiteId)  { $SensitivitySiteId }  else { $script:SiteId }
+    if (-not $id) {
+        Log "  WARNING: could not find the ID of the '$SensitivityLabelName' label, so the file is saved unlabelled (Excel may ask). See `$SensitivityLabelId at the top of the script."
+        return
+    }
+    try {
+        $info = $wb.SensitivityLabel.CreateLabelInfo()
+        $info.AssignmentMethod = 1                      # set on the user's behalf
+        $info.LabelId   = $id
+        $info.LabelName = $name
+        if ($site) { $info.SiteId = $site }
+        $wb.SensitivityLabel.SetLabel($info, $info)
+        Log "  labelled '$name'"
+    } catch {
+        Log "  WARNING: could not apply the '$name' label: $($_.Exception.Message)"
+    }
+}
+
 # Paste a range as values + number formats at A1 of a sheet.
 function Copy-Values($app, $srcRange, $destSheet) {
     Invoke-Excel { $srcRange.Copy() | Out-Null; $destSheet.Range('A1').PasteSpecial(12) | Out-Null } | Out-Null
@@ -212,6 +254,8 @@ function Save-Snapshot($wb) {
     try {
         Copy-Values $app $ws.Range($SnapRange) $snapWb.Worksheets.Item(1)
         $snapWb.Worksheets.Item(1).Name = 'Closing Snap'
+        Read-Label $wb
+        Set-Label $snapWb
         $app.DisplayAlerts = $false                      # overwrite if today's file already exists
         Invoke-Excel { $snapWb.SaveAs($snapPath, 51) } | Out-Null   # 51 = .xlsx
     } finally {
@@ -248,6 +292,7 @@ function Assert-SnapExists([datetime]$d) {
 function Copy-FromSnapFile($app, [datetime]$d, $destSheet) {
     $src = Invoke-Excel { $app.Workbooks.Open((Get-SnapPath $d), 0, $true) }      # no link update, read-only
     try {
+        Read-Label $src
         $s = $src.Worksheets.Item(1)
         $shape = $s.Range($SnapRange)                                             # same size as the snap range
         Copy-Values $app $s.Range('A1').Resize($shape.Rows.Count, $shape.Columns.Count) $destSheet
@@ -308,6 +353,8 @@ function Invoke-Compare {
             $label = "Live {0:dd-MM-yyyy HHmm}" -f (Get-Date)
         }
 
+        if ($live) { Read-Label $live }
+        Set-Label $out
         $folder = Join-Path $SnapFolder 'Comparisons'
         if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder | Out-Null }
         $path = Join-Path $folder ("Fra Compare {0:dd-MM-yyyy} vs {1}.xlsx" -f $x, $label)
@@ -321,6 +368,16 @@ function Invoke-Compare {
 
 # ---------------------------------------------------------------------------------------------
 try {
+    if ($ShowLabel) {
+        try { $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application') }
+        catch { $app = New-Object -ComObject Excel.Application; $app.Visible = $true; $app.UserControl = $true }
+        $f = $app.Workbooks.Open($ShowLabel, 0, $true)
+        $l = $f.SensitivityLabel.GetLabel()
+        Log "Label name: '$($l.LabelName)'   SensitivityLabelId: $($l.LabelId)   SensitivitySiteId: $($l.SiteId)"
+        $f.Close($false)
+        exit 0
+    }
+
     if ($Compare -or $Date1) { Invoke-Compare; Log 'All done.'; exit 0 }
 
     $wb = Get-ExcelWorkbook
