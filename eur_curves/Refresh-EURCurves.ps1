@@ -10,6 +10,12 @@ Run it once a day via Run-EURCurves.bat and leave the window open until it finis
 
   -FrasOnly   skip step 1 (e.g. to re-take the snap)
   -SnapNow    do not wait for the snap time
+
+Compare mode (run via Compare-Fras.bat):
+  -Compare [-Date1 dd-MM-yyyy] [-Date2 dd-MM-yyyy]
+  Builds a new workbook with one tab per date ("fra snap dd-MM-yyyy", earlier date first) from the
+  saved closing snaps. With only one date, the second tab is the live Fras tab, refreshed now.
+  Dates are asked for if not given.
 #>
 param(
     [string]$WorkbookFolder = 'C:\Users\n527049\OneDrive - Santander Office 365\Documentos',
@@ -25,7 +31,10 @@ param(
     # e.g. 'RefreshEntireWorksheet' for Bloomberg. Leave empty to just recalculate the tab.
     [string]$RefreshMacro   = '',
     [switch]$FrasOnly,
-    [switch]$SnapNow
+    [switch]$SnapNow,
+    [switch]$Compare,
+    [string]$Date1 = '',
+    [string]$Date2 = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -133,19 +142,24 @@ function Refresh-Sheet($wb, [string]$name) {
     Log ("'{0}' done in {1:n1} min" -f $ws.Name, $sw.Elapsed.TotalMinutes)
 }
 
+# Paste a range as values + number formats at A1 of a sheet.
+function Copy-Values($app, $srcRange, $destSheet) {
+    Invoke-Excel { $srcRange.Copy() | Out-Null; $destSheet.Range('A1').PasteSpecial(12) | Out-Null } | Out-Null
+    $app.CutCopyMode = 0
+    try { $destSheet.Columns.AutoFit() | Out-Null } catch {}
+}
+
 function Save-Snapshot($wb) {
     $app = $wb.Application
     $ws  = Get-Sheet $wb $FrasSheet
     if (-not (Test-Path -LiteralPath $SnapFolder)) { New-Item -ItemType Directory -Path $SnapFolder | Out-Null }
-    $snapPath = Join-Path $SnapFolder ("Closing Snap {0:dd-MM-yyyy}.xlsx" -f (Get-Date))
+    $snapPath = Get-SnapPath (Get-Date)
 
     Log "Copying $($ws.Name)!$SnapRange to $snapPath"
     $snapWb = Invoke-Excel { $app.Workbooks.Add() }
     $prevAlerts = $app.DisplayAlerts
     try {
-        $dest = $snapWb.Worksheets.Item(1).Range('A1')
-        Invoke-Excel { $ws.Range($SnapRange).Copy() | Out-Null; $dest.PasteSpecial(12) | Out-Null } | Out-Null  # values + number formats
-        $app.CutCopyMode = 0
+        Copy-Values $app $ws.Range($SnapRange) $snapWb.Worksheets.Item(1)
         $snapWb.Worksheets.Item(1).Name = 'Closing Snap'
         $app.DisplayAlerts = $false                      # overwrite if today's file already exists
         Invoke-Excel { $snapWb.SaveAs($snapPath, 51) } | Out-Null   # 51 = .xlsx
@@ -156,8 +170,108 @@ function Save-Snapshot($wb) {
     Log "Saved $snapPath"
 }
 
+# ----------------------------------- compare mode --------------------------------------------
+function Get-SnapPath([datetime]$d) {
+    Join-Path $SnapFolder ("Closing Snap {0:dd-MM-yyyy}.xlsx" -f $d)
+}
+
+function Parse-SnapDate([string]$text) {
+    $formats = [string[]]@('d-M-yyyy', 'd/M/yyyy', 'd.M.yyyy', 'd-M-yy', 'd/M/yy', 'ddMMyyyy', 'yyyy-MM-dd')
+    $d = [datetime]::MinValue
+    $ok = [datetime]::TryParseExact($text.Trim(), $formats, [Globalization.CultureInfo]::InvariantCulture,
+                                    [Globalization.DateTimeStyles]::None, [ref]$d)
+    if (-not $ok) { throw "Could not read '$text' as a date. Use dd-mm-yyyy, e.g. 14-11-2026." }
+    return $d
+}
+
+# Stop early, with the list of dates that do exist, if there is no snap for the date.
+function Assert-SnapExists([datetime]$d) {
+    if (Test-Path -LiteralPath (Get-SnapPath $d)) { return }
+    $have = @(Get-ChildItem -LiteralPath $SnapFolder -Filter 'Closing Snap *.xlsx' -ErrorAction SilentlyContinue |
+        ForEach-Object { try { Parse-SnapDate ($_.BaseName -replace '^Closing Snap ', '') } catch {} } |
+        Sort-Object -Descending | Select-Object -First 10 | ForEach-Object { $_.ToString('dd-MM-yyyy') })
+    $list = if ($have.Count) { "Most recent snaps available: $($have -join ', ')" } else { "There are no snaps in $SnapFolder yet." }
+    throw ("No closing snap saved for {0:dd-MM-yyyy}. {1}" -f $d, $list)
+}
+
+function Copy-FromSnapFile($app, [datetime]$d, $destSheet) {
+    $src = Invoke-Excel { $app.Workbooks.Open((Get-SnapPath $d), 0, $true) }      # no link update, read-only
+    try {
+        $s = $src.Worksheets.Item(1)
+        $shape = $s.Range($SnapRange)                                             # same size as the snap range
+        Copy-Values $app $s.Range('A1').Resize($shape.Rows.Count, $shape.Columns.Count) $destSheet
+    } finally {
+        try { $src.Close($false) } catch {}
+    }
+}
+
+function Invoke-Compare {
+    if (-not $Date1) {
+        $Date1 = Read-Host 'First date  (dd-mm-yyyy)'
+        $Date2 = Read-Host 'Second date (dd-mm-yyyy, or just press Enter to compare against LIVE rates)'
+    }
+    $x = Parse-SnapDate $Date1
+    $y = $null
+    if ($Date2.Trim()) {
+        $y = Parse-SnapDate $Date2
+        if ($y -eq $x) { throw 'The two dates are the same.' }
+        if ($y -lt $x) { $x, $y = $y, $x }                 # earlier date always goes first
+    }
+    Assert-SnapExists $x
+    if ($y) { Assert-SnapExists $y }
+
+    $live = $null
+    if ($y) {
+        try { $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application') }
+        catch { $app = New-Object -ComObject Excel.Application }
+        $app.Visible = $true
+    } else {
+        $live = Get-ExcelWorkbook
+        $app  = $live.Application
+        Refresh-Sheet $live $FrasSheet
+    }
+
+    $out = Invoke-Excel { $app.Workbooks.Add() }
+    $prevAlerts = $app.DisplayAlerts
+    $app.DisplayAlerts = $false
+    try {
+        while ($out.Worksheets.Count -lt 2) { $out.Worksheets.Add([Type]::Missing, $out.Worksheets.Item($out.Worksheets.Count)) | Out-Null }
+        while ($out.Worksheets.Count -gt 2) { $out.Worksheets.Item($out.Worksheets.Count).Delete() }
+        $tab1 = $out.Worksheets.Item(1)
+        $tab2 = $out.Worksheets.Item(2)
+
+        # Excel does not allow "/" in tab names, so the date is written with dashes.
+        $tab1.Name = "fra snap {0:dd-MM-yyyy}" -f $x
+        Log "Copying closing snap $($x.ToString('dd-MM-yyyy')) to tab 1"
+        Copy-FromSnapFile $app $x $tab1
+
+        if ($y) {
+            $tab2.Name = "fra snap {0:dd-MM-yyyy}" -f $y
+            Log "Copying closing snap $($y.ToString('dd-MM-yyyy')) to tab 2"
+            Copy-FromSnapFile $app $y $tab2
+            $label = $y.ToString('dd-MM-yyyy')
+        } else {
+            $tab2.Name = "fra snap {0:dd-MM-yyyy} live" -f (Get-Date)
+            Log "Copying live $FrasSheet!$SnapRange to tab 2"
+            Copy-Values $app (Get-Sheet $live $FrasSheet).Range($SnapRange) $tab2
+            $label = "Live {0:dd-MM-yyyy HHmm}" -f (Get-Date)
+        }
+
+        $folder = Join-Path $SnapFolder 'Comparisons'
+        if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder | Out-Null }
+        $path = Join-Path $folder ("Fra Compare {0:dd-MM-yyyy} vs {1}.xlsx" -f $x, $label)
+        Invoke-Excel { $out.SaveAs($path, 51) } | Out-Null
+        Invoke-Excel { $out.Activate(); $tab1.Activate() } | Out-Null
+        Log "Saved $path (left open in Excel)"
+    } finally {
+        $app.DisplayAlerts = $prevAlerts
+    }
+}
+
 # ---------------------------------------------------------------------------------------------
 try {
+    if ($Compare -or $Date1) { Invoke-Compare; Log 'All done.'; exit 0 }
+
     $wb = Get-ExcelWorkbook
 
     if (-not $FrasOnly) {
