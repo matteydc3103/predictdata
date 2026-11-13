@@ -26,10 +26,11 @@ param(
     [string]$FrasSheet      = 'Fras',
     [string]$SnapRange      = 'P3:AB12803',
     [string]$SnapTime       = '17:15',                       # 24h local time
-    [int]$TimeoutMinutes    = 90,                            # max wait per tab refresh
+    [int]$TimeoutMinutes    = 240,                           # max wait per tab refresh
     # Optional: name of a macro that refreshes the active sheet, run before the recalculation.
     # e.g. 'RefreshEntireWorksheet' for Bloomberg. Leave empty to just recalculate the tab.
     [string]$RefreshMacro   = '',
+    [switch]$DirtyCellsOnly,                                 # only recalc changed cells (plain Shift+F9) instead of the whole tab
     [int]$AddInWaitSeconds  = 30,                            # pause after opening, for data add-ins to connect
     [switch]$FrasOnly,
     [switch]$SnapNow,
@@ -135,6 +136,7 @@ function Wait-SheetReady($app, $ws) {
             if ($app.CalculationState -eq 1) { $why = 'Excel is still calculating' }
             elseif ($null -ne $ws.UsedRange.Find('Requesting Data', [Type]::Missing, -4163, 2)) {   # xlValues, xlPart
                 $why = 'cells are still showing "Requesting Data"'
+                $ws.Calculate()                   # in manual mode, arrived data only shows after a recalc
             }
             $errors = 0
         } catch {
@@ -166,10 +168,23 @@ function Refresh-Sheet($wb, [string]$name) {
     foreach ($qt in $ws.QueryTables) { try { $qt.Refresh($false) | Out-Null } catch { Log "  query refresh failed: $_" } }
     foreach ($lo in $ws.ListObjects) { try { $lo.QueryTable.Refresh($false) | Out-Null } catch {} }
 
-    # Recalculate this tab only (same as Shift+F9)
-    Invoke-Excel { $ws.Calculate() } | Out-Null
-
-    Wait-SheetReady $app $ws
+    # Recalculate this tab only.
+    $prevKey = $app.CalculationInterruptKey
+    try {
+        $app.CalculationInterruptKey = 0          # a key press / click must not abort a long calculation
+        if (-not $DirtyCellsOnly) {
+            # Mark every formula on the tab as needing recalculation. A plain Shift+F9 only redoes
+            # cells Excel believes have changed, which right after opening the file is almost none.
+            $ws.EnableCalculation = $false
+            $ws.EnableCalculation = $true
+        }
+        Invoke-Excel { $ws.Calculate() } | Out-Null
+        Wait-SheetReady $app $ws
+        Invoke-Excel { $ws.Calculate() } | Out-Null   # settle anything that changed while data arrived
+        Wait-SheetReady $app $ws
+    } finally {
+        try { $app.CalculationInterruptKey = $prevKey } catch {}
+    }
     try {
         if ($null -ne $ws.UsedRange.Find('#NAME?', [Type]::Missing, -4163, 2)) {
             Log "  WARNING: '$($ws.Name)' contains #NAME? errors - a data add-in is probably not loaded."
