@@ -80,7 +80,8 @@ function Find-Workbook($app) {
 # see Excel (e.g. Excel has been in the foreground since it started) and for OneDrive files that
 # Excel has open under their https:// address.
 if (-not ('RotHelper' -as [type])) {
-    Add-Type -TypeDefinition @'
+  try {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -107,10 +108,12 @@ public static class RotHelper {
     }
 }
 '@
+  } catch { }    # if this is blocked on the PC, fall back to asking Excel directly (as before)
 }
 
 function Find-OpenWorkbook {
     foreach ($ext in 'xlsm', 'xlsx', 'xlsb', 'xls') {
+        if (-not ('RotHelper' -as [type])) { break }
         try {
             $wb = [RotHelper]::Find("$WorkbookName.$ext")
             if ($wb) { $null = $wb.Name; return $wb }
