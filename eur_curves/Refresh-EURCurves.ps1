@@ -75,6 +75,53 @@ function Find-Workbook($app) {
     return $null
 }
 
+# Find EURCurves_Demo if it is already open in ANY Excel window. Excel registers every open
+# workbook in the Windows "running object table", so this works even when GetActiveObject cannot
+# see Excel (e.g. Excel has been in the foreground since it started) and for OneDrive files that
+# Excel has open under their https:// address.
+if (-not ('RotHelper' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+public static class RotHelper {
+    [DllImport("ole32.dll")] static extern int GetRunningObjectTable(int r, out IRunningObjectTable rot);
+    [DllImport("ole32.dll")] static extern int CreateBindCtx(int r, out IBindCtx ctx);
+    public static object Find(string fileName) {
+        IRunningObjectTable rot; IEnumMoniker e; IBindCtx ctx;
+        if (GetRunningObjectTable(0, out rot) != 0) return null;
+        CreateBindCtx(0, out ctx);
+        rot.EnumRunning(out e);
+        IMoniker[] m = new IMoniker[1];
+        while (e.Next(1, m, IntPtr.Zero) == 0) {
+            string name = null;
+            try { m[0].GetDisplayName(ctx, null, out name); } catch { continue; }
+            if (name == null) continue;
+            string n = Uri.UnescapeDataString(name).Replace('/', '\\');
+            if (n.EndsWith("\\" + fileName, StringComparison.OrdinalIgnoreCase)) {
+                object o; rot.GetObject(m[0], out o); return o;
+            }
+        }
+        return null;
+    }
+}
+'@
+}
+
+function Find-OpenWorkbook {
+    foreach ($ext in 'xlsm', 'xlsx', 'xlsb', 'xls') {
+        try {
+            $wb = [RotHelper]::Find("$WorkbookName.$ext")
+            if ($wb) { $null = $wb.Name; return $wb }
+        } catch {}
+    }
+    try {                                                     # fallback: ask the active Excel
+        $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
+        return (Invoke-Excel { Find-Workbook $app } 5)
+    } catch { return $null }
+}
+
 # Get the workbook. If it is already open in Excel, use that. Otherwise start Excel ourselves,
 # load the installed add-ins (Excel does not load them on its own when started by a script) and
 # open the workbook. Nothing needs to be open beforehand.
@@ -83,14 +130,9 @@ function Get-ExcelWorkbook {
         try { $null = $script:CachedWb.Name; return $script:CachedWb } catch { $script:CachedWb = $null }
     }
 
-    try {
-        $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
-        $wb  = Invoke-Excel { Find-Workbook $app } 5
-        if ($wb) { Log "Using already-open workbook $($wb.Name)"; $script:CachedWb = $wb; return $wb }
-        Log "Excel is running but $WorkbookName is not open in it - starting a separate Excel."
-    } catch {
-        Log "No running Excel found - starting Excel."
-    }
+    $wb = Find-OpenWorkbook
+    if ($wb) { Log "Using already-open workbook $($wb.Name)"; $script:CachedWb = $wb; return $wb }
+    Log "$WorkbookName is not open - starting Excel and opening it."
 
     $file = Get-ChildItem -LiteralPath $WorkbookFolder -Filter "$WorkbookName.xls*" |
             Where-Object { $_.Name -notlike '~$*' } | Select-Object -First 1
@@ -322,8 +364,14 @@ function Invoke-Compare {
         catch { $app = New-Object -ComObject Excel.Application }
         $app.Visible = $true
     } else {
-        $live = Get-ExcelWorkbook
-        $app  = $live.Application
+        # Live rates come from the copy of EURCurves_Demo you already have open (Initialization and
+        # Grp already calculated there), so only the Fras tab is refreshed.
+        $live = Find-OpenWorkbook
+        if (-not $live) {
+            throw "$WorkbookName is not open. Open it in Excel (with Initialization and Grp refreshed), then run the comparison again."
+        }
+        Log "Using open workbook $($live.Name) - refreshing '$FrasSheet' only"
+        $app = $live.Application
         Refresh-Sheet $live $FrasSheet
     }
 
