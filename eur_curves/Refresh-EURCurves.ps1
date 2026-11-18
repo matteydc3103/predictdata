@@ -283,10 +283,20 @@ function Set-Label($wb) {
     }
 }
 
-# Paste a range as values + number formats at A1 of a sheet.
+# Copy a range as values + number formats to A1 of a sheet. Done directly, without the
+# clipboard, so it cannot clash with anything else being copied and pasted on the PC.
 function Copy-Values($app, $srcRange, $destSheet) {
-    Invoke-Excel { $srcRange.Copy() | Out-Null; $destSheet.Range('A1').PasteSpecial(12) | Out-Null } | Out-Null
-    $app.CutCopyMode = 0
+    $rows = $srcRange.Rows.Count; $cols = $srcRange.Columns.Count
+    $dest = $destSheet.Range('A1').Resize($rows, $cols)
+    Invoke-Excel { $dest.Value2 = $srcRange.Value2 } | Out-Null
+    for ($c = 1; $c -le $cols; $c++) {          # number formats: header row, then the data rows
+        try {
+            $dest.Cells.Item(1, $c).NumberFormat = $srcRange.Cells.Item(1, $c).NumberFormat
+            if ($rows -gt 1) {
+                $dest.Cells.Item(2, $c).Resize($rows - 1, 1).NumberFormat = $srcRange.Cells.Item(2, $c).NumberFormat
+            }
+        } catch {}
+    }
     try { $destSheet.Columns.AutoFit() | Out-Null } catch {}
 }
 
