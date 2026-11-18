@@ -25,6 +25,9 @@ param(
     [string]$GrpSheet       = 'Grp',
     [string]$FrasSheet      = 'Fras',
     [string]$SnapRange      = 'P3:AB12803',
+    # Which column of the snap holds the FRA date used to line the two days up
+    # (1 = first column of the snap = column P of the Fras tab).
+    [int]$CompareDateColumn = 1,
     [string]$SnapTime       = '17:15',                       # 24h local time
     [int]$TimeoutMinutes    = 240,                           # max wait per tab refresh
     # Optional: name of a macro that refreshes the active sheet, run before the recalculation.
@@ -346,6 +349,108 @@ function Copy-FromSnapFile($app, [datetime]$d, $destSheet) {
     }
 }
 
+# Turn a cell value into a whole-day key (Excel date serial) so dates can be matched.
+function Get-DateKey($v) {
+    if ($null -eq $v) { return $null }
+    if ($v -is [double] -or $v -is [int]) {
+        if ($v -ge 1) { return [int][math]::Floor([double]$v) }
+        return $null
+    }
+    if ($v -is [string] -and $v.Trim()) {
+        $d = [datetime]::MinValue
+        $fmts = [string[]]@('dd/MM/yyyy', 'd/M/yyyy', 'dd-MM-yyyy', 'd-M-yyyy', 'dd.MM.yyyy', 'yyyy-MM-dd')
+        if ([datetime]::TryParseExact($v.Trim(), $fmts, [Globalization.CultureInfo]::InvariantCulture,
+                                      [Globalization.DateTimeStyles]::None, [ref]$d)) {
+            return [int][math]::Floor($d.ToOADate())
+        }
+    }
+    return $null
+}
+
+# Build the 'Comparison' tab: column A = the later date's FRA dates (from A2 down), every other
+# column = later minus earlier for the SAME FRA date. Rows are matched on the date, not on the row
+# number, because the curve rolls forward each business day.
+function Add-ComparisonTab($app, $out, $early, $late, [string]$earlyName, [string]$lateName) {
+    $shape = $early.Range($SnapRange)
+    $rows = $shape.Rows.Count; $cols = $shape.Columns.Count
+    $dc = $CompareDateColumn
+    if ($dc -lt 1 -or $dc -gt $cols) { throw "CompareDateColumn must be between 1 and $cols." }
+
+    Log "Building 'Comparison' tab ($lateName minus $earlyName, matched on date) ..."
+    $E = $early.Range('A1').Resize($rows, $cols).Value2
+    $L = $late.Range('A1').Resize($rows, $cols).Value2
+
+    # Row 1 of the snap is a header if its date column does not hold a date.
+    $hasHeader = ($null -eq (Get-DateKey $L[1, $dc]))
+    $first = if ($hasHeader) { 2 } else { 1 }
+
+    # Earlier day: FRA date -> row
+    $idx = @{}
+    for ($r = $first; $r -le $rows; $r++) {
+        $k = Get-DateKey $E[$r, $dc]
+        if ($null -ne $k -and -not $idx.ContainsKey($k)) { $idx[$k] = $r }
+    }
+    if ($idx.Count -eq 0) {
+        throw "No dates found in column $dc of '$earlyName'. Set CompareDateColumn at the top of the script to the snap column that holds the FRA date."
+    }
+
+    # Output columns: the date first, then every other snap column in order.
+    $srcCols = @($dc) + @(1..$cols | Where-Object { $_ -ne $dc })
+
+    # Columns that hold dates (e.g. start / end dates) are shown as the later day's value, not diffed.
+    $isDate = @{}
+    foreach ($c in $srcCols) {
+        $fmt = [string]$late.Cells.Item($first, $c).NumberFormat
+        $isDate[$c] = ($c -ne $dc) -and ($fmt -match '[dmy]') -and ($fmt -notmatch '^General$')
+    }
+
+    $outRows = $rows - $first + 2
+    $A = New-Object 'object[,]' $outRows, $cols
+    for ($j = 0; $j -lt $cols; $j++) {
+        $c = $srcCols[$j]
+        $h = if ($hasHeader -and $null -ne $L[1, $c]) { [string]$L[1, $c] } else { "Column $c" }
+        if ($j -eq 0) { $h = "Date ($lateName)" }
+        elseif (-not $isDate[$c]) { $h = "$h change" }
+        $A[0, $j] = $h
+    }
+
+    $matched = 0; $unmatched = @()
+    for ($r = $first; $r -le $rows; $r++) {
+        $k = Get-DateKey $L[$r, $dc]
+        if ($null -eq $k) { continue }
+        $i = $r - $first + 1
+        $A[$i, 0] = [double]$k
+        $er = $idx[$k]
+        if ($er) { $matched++ } else { $unmatched += [datetime]::FromOADate($k).ToString('dd-MM-yyyy') }
+        for ($j = 1; $j -lt $cols; $j++) {
+            $c = $srcCols[$j]
+            $lv = $L[$r, $c]
+            if ($isDate[$c]) { $A[$i, $j] = $lv; continue }
+            if ($er) {
+                $ev = $E[$er, $c]
+                if (($lv -is [double]) -and ($ev -is [double])) { $A[$i, $j] = $lv - $ev }
+            }
+        }
+    }
+
+    $ws = $out.Worksheets.Add([Type]::Missing, $out.Worksheets.Item($out.Worksheets.Count))
+    $ws.Name = 'Comparison'
+    $ws.Range('A1').Resize($outRows, $cols).Value2 = $A
+    $ws.Columns.Item(1).NumberFormat = 'dd/mm/yyyy'
+    for ($j = 1; $j -lt $cols; $j++) {
+        try { $ws.Columns.Item($j + 1).NumberFormat = $late.Cells.Item($first, $srcCols[$j]).NumberFormat } catch {}
+    }
+    $ws.Rows.Item(1).Font.Bold = $true
+    try { $ws.Columns.AutoFit() | Out-Null } catch {}
+    try { $ws.Activate(); $app.ActiveWindow.SplitRow = 1; $app.ActiveWindow.FreezePanes = $true } catch {}
+
+    Log "  $matched dates matched."
+    if ($unmatched.Count) {
+        $show = ($unmatched | Select-Object -First 5) -join ', '
+        Log "  $($unmatched.Count) dates in $lateName are not in $earlyName, left blank (e.g. $show)."
+    }
+}
+
 function Invoke-Compare {
     if (-not $Date1) {
         $Date1 = Read-Host 'First date  (dd-mm-yyyy)'
@@ -403,6 +508,8 @@ function Invoke-Compare {
             Copy-Values $app (Get-Sheet $live $FrasSheet).Range($SnapRange) $tab2
             $label = "Live {0:dd-MM-yyyy HHmm}" -f (Get-Date)
         }
+
+        Add-ComparisonTab $app $out $tab1 $tab2 $tab1.Name $tab2.Name
 
         if ($live) { Read-Label $live }
         Set-Label $out
