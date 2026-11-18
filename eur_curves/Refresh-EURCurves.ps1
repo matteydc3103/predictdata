@@ -13,8 +13,9 @@ Run it once a day via Run-EURCurves.bat and leave the window open until it finis
 
 Compare mode (run via Compare-Fras.bat):
   -Compare [-Date1 dd-MM-yyyy] [-Date2 dd-MM-yyyy]
-  Builds a new workbook with one tab per date ("fra snap dd-MM-yyyy", earlier date first) from the
-  saved closing snaps. With only one date, the second tab is the live Fras tab, refreshed now.
+  Builds a new workbook with one tab per date ("fra snap dd-MM-yyyy", earlier date first) plus a
+  'Comparison' tab. With only one date, it is compared with today. Today means today's closing snap
+  if it has been taken, otherwise the live Fras tab (refreshed now). -Date2 LIVE forces live rates.
   Dates are asked for if not given.
 #>
 param(
@@ -464,20 +465,33 @@ function Add-ComparisonTab($app, $out, $early, $late, [string]$earlyName, [strin
 function Invoke-Compare {
     if (-not $Date1) {
         $Date1 = Read-Host 'First date  (dd-mm-yyyy)'
-        $Date2 = Read-Host 'Second date (dd-mm-yyyy, or just press Enter to compare against LIVE rates)'
+        $Date2 = Read-Host 'Second date (dd-mm-yyyy, or press Enter for TODAY, or type LIVE to force live rates)'
     }
+    $today = (Get-Date).Date
     $x = Parse-SnapDate $Date1
-    $y = $null
-    if ($Date2.Trim()) {
-        $y = Parse-SnapDate $Date2
-        if ($y -eq $x) { throw 'The two dates are the same.' }
-        if ($y -lt $x) { $x, $y = $y, $x }                 # earlier date always goes first
+    $d2 = "$Date2".Trim()
+    $forceLive = ($d2 -ieq 'live')
+    # No second date (or LIVE) means "compare with today".
+    $y = if ($d2 -and -not $forceLive) { Parse-SnapDate $d2 } else { $today }
+    if ($y -eq $x) { throw ("Both dates are {0:dd-MM-yyyy} - pick two different days." -f $x) }
+    if ($y -lt $x) { $x, $y = $y, $x }                     # earlier date always goes first
+
+    # Today: use today's closing snap if it has already been taken, otherwise live rates.
+    $useLive = $false
+    if ($y -eq $today) {
+        if ($forceLive) {
+            $useLive = $true; Log 'LIVE requested - using live rates for today.'
+        } elseif (Test-Path -LiteralPath (Get-SnapPath $today)) {
+            Log "Today's closing snap has been taken - using it for today."
+        } else {
+            $useLive = $true; Log "No closing snap for today yet - using live rates for today."
+        }
     }
     Assert-SnapExists $x
-    if ($y) { Assert-SnapExists $y }
+    if (-not $useLive) { Assert-SnapExists $y }
 
     $live = $null
-    if ($y) {
+    if (-not $useLive) {
         try { $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application') }
         catch { $app = New-Object -ComObject Excel.Application }
         $app.Visible = $true
@@ -507,7 +521,7 @@ function Invoke-Compare {
         Log "Copying closing snap $($x.ToString('dd-MM-yyyy')) to tab 1"
         Copy-FromSnapFile $app $x $tab1
 
-        if ($y) {
+        if (-not $useLive) {
             $tab2.Name = "fra snap {0:dd-MM-yyyy}" -f $y
             Log "Copying closing snap $($y.ToString('dd-MM-yyyy')) to tab 2"
             Copy-FromSnapFile $app $y $tab2
